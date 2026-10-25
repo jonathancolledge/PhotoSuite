@@ -1,0 +1,8 @@
+{
+ "name": "Photo Suite",
+ "apps": [
+  "PhotoLibrary",
+  "RAWDemosaic",
+  "panoramamaker"
+ ]
+}

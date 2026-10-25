@@ -1,0 +1,3117 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later · Copyright (C) 2026 Jonathan Colledge · see LICENSE and THIRD_PARTY.md -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PANOSTITCH — in-browser panorama stitcher</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><circle cx='24' cy='24' r='19' fill='none' stroke='%233949ab' stroke-width='5'/><circle cx='24' cy='24' r='7' fill='%233949ab'/></svg>">
+<link rel="stylesheet" href="w3.css">
+<style>
+    /* Minimal fallbacks for the w3.css classes used, in case w3.css is not alongside this file */
+    .w3-container { padding: 0.01em 16px; }
+    .w3-container:after { content: ""; display: table; clear: both; }
+    .w3-indigo { color: #fff !important; background-color: var(--indigo) !important; }
+    .w3-card-2 { box-shadow: 0 2px 4px 0 rgba(0,0,0,0.16), 0 2px 10px 0 rgba(0,0,0,0.12); }
+    .w3-card-8 { box-shadow: 0 8px 16px 0 rgba(0,0,0,0.2), 0 6px 20px 0 rgba(0,0,0,0.19); }
+    .w3-tiny { font-size: 10px !important; }
+    .w3-topnav { padding: 8px 8px; background: var(--card); }
+    .w3-topnav a { padding: 0 8px; color: var(--text); text-decoration: none; }
+    .w3-topnav a:hover { text-decoration: underline; }
+</style>
+<style>
+    :root, [data-theme="dark"] {
+        --bg: #121417; --card: #1d2025; --card2: #252930; --text: #e2e5ea; --muted: #9aa3ad; --border: #353b44;
+        --input: #15181c; --indigo: #3949ab; --accent: #ff6e55; --accent-hover: #ff8670; --link: #8c9eff; --ok: #43a047;
+        --ok-bg: #12301a; --ok-fg: #a5d6a7; --err-bg: #3b1518; --err-fg: #ef9a9a; --info-bg: #10303a; --info-fg: #80deea;
+        --warn-bg: #3a2c10; --warn-fg: #ffd98a; --track: #2c3138; --checker: #262a30; color-scheme: dark;
+    }
+    [data-theme="light"] {
+        --bg: #f5f5f5; --card: #ffffff; --card2: #f3f4f8; --text: #222; --muted: #666; --border: #ccc;
+        --input: #fff; --indigo: #3f51b5; --accent: #ff6347; --accent-hover: #ff6376; --link: #3f51b5; --ok: #4caf50;
+        --ok-bg: #d4edda; --ok-fg: #155724; --err-bg: #f8d7da; --err-fg: #721c24; --info-bg: #d1ecf1; --info-fg: #0c5460;
+        --warn-bg: #fff3cd; --warn-fg: #7a5b05; --track: #e0e0e0; --checker: #e9e9e9; color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: var(--bg); color: var(--text); }
+    .hidden { display: none !important; }
+    a { color: var(--link); }
+    .btn {
+        background-color: var(--accent); color: white; padding: 10px 18px; border: none; border-radius: 4px;
+        cursor: pointer; font-size: 15px; transition: background-color 0.3s; margin: 4px 4px 4px 0; display: inline-block;
+    }
+    .btn:hover { background-color: var(--accent-hover); }
+    .btn:disabled { background-color: #555; color: #999; cursor: default; opacity: .6; }
+    .btn-indigo { background-color: var(--indigo); }
+    .btn-indigo:hover { background-color: #5c6bc0; }
+    .btn-small { padding: 6px 12px; font-size: 14px; }
+    .btn-full { width: 100%; text-align: center; font-weight: bold; margin-top: 12px; }
+    .drawer-btn { background-color: var(--card2); color: var(--text); border: 1px solid var(--border); }
+    .drawer-btn:hover { background-color: var(--border); }
+    .link-btn { background: none; border: none; color: var(--link); cursor: pointer; padding: 0 8px; font-size: 14px; text-decoration: underline; }
+
+    .prog { width: 100%; height: 14px; background-color: var(--track); border-radius: 7px; overflow: hidden; margin: 10px 0 0; opacity: 0; transition: opacity .2s; }
+    .prog.on { opacity: 1; }
+    .prog i { display: block; height: 100%; background-color: var(--ok); transition: width 0.3s ease; width: 0%; }
+
+    .hint { color: var(--muted); font-size: 13px; margin: 6px 0; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+    select, input[type=text] {
+        padding: 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--input); color: var(--text); font-size: 14px;
+    }
+    input[type=text] { min-width: 0; flex: 1; }
+    input[type=checkbox] { accent-color: var(--indigo); }
+    label { font-size: 14px; }
+    label.mini { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+    label.mini select { font-size: 13px; }
+
+    .card { background: var(--card); padding: 0 16px 14px 16px; border-radius: 8px; margin: 0 0 16px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.25); }
+    .card h4 { margin: 0 -16px 12px -16px; padding: 8px 16px; border-radius: 8px 8px 0 0; font-size: 15px; }
+
+    .layout { display: flex; align-items: flex-start; gap: 18px; flex-wrap: wrap; }
+    .layout > .col { flex: 1; min-width: 340px; }
+
+    /* ── filmstrip ──────────────────────────── */
+    .drop { border: 2px dashed var(--border); border-radius: 6px; padding: 20px 14px; text-align: center; color: var(--muted); font-size: 13px; cursor: pointer; transition: border-color .2s, color .2s; }
+    .drop:hover, .drop.over { border-color: var(--accent); color: var(--text); }
+    .drop h3 { margin: 4px 0 4px; color: var(--text); font-size: 15px; }
+    .shots { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+    .shot { display: grid; grid-template-columns: 70px 1fr auto; gap: 10px; align-items: center; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--card2); }
+    .shot img { width: 70px; height: 44px; object-fit: cover; border-radius: 4px; display: block; }
+    .shot .idx { font-weight: bold; color: var(--link); margin-right: 6px; font-size: 12px; }
+    .shot .nm { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .shot .dm { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .shot .end { display: flex; align-items: center; gap: 8px; }
+    .rm { cursor: pointer; color: var(--muted); font-size: 15px; padding: 2px 4px; }
+    .rm:hover { color: var(--accent); }
+
+    /* ── engine ─────────────────────────────── */
+    .slot { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--card2); margin-bottom: 8px; }
+    .shead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; flex-wrap: wrap; }
+    .sname { font-weight: bold; font-size: 14px; }
+    .sname small { display: block; font-weight: normal; font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .st { font-size: 12px; display: flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+    .st i { width: 7px; height: 7px; border-radius: 50%; background: #777; display: inline-block; }
+    .st.ok { color: var(--ok); } .st.ok i { background: var(--ok); }
+    .st.load { color: #e8a33c; } .st.load i { background: #e8a33c; }
+    .mlist { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; }
+    .mitem { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); padding: 6px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--card); }
+    .mitem b { color: var(--ok); }
+    .mitem.missing { color: var(--muted); }
+
+    /* ── leds ───────────────────────────────── */
+    .leds { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    .led { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+    .led i { width: 8px; height: 8px; border-radius: 50%; background: #777; display: inline-block; }
+    .led.on i { background: var(--ok); }
+    .led.warn i { background: #e8a33c; }
+
+    /* ── console ────────────────────────────── */
+    .console { font-family: 'Consolas','Courier New',monospace; font-size: 12px; line-height: 1.7; height: 240px; overflow-y: auto; padding: 10px 12px; background: var(--input); border: 1px solid var(--border); border-radius: 6px; }
+    .ll { display: flex; gap: 8px; }
+    .ll .t { color: var(--muted); flex: none; }
+    .ll .m { color: var(--text); word-break: break-word; }
+    .ll.ok .m { color: var(--ok-fg); }
+    .ll.warn .m { color: #e8a33c; }
+    .ll.err .m { color: var(--err-fg); }
+
+    /* ── output ─────────────────────────────── */
+    .outwrap { position: relative; background: repeating-conic-gradient(var(--checker) 0% 25%, var(--bg) 0% 50%) 50% / 24px 24px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; min-height: 200px; display: flex; align-items: center; justify-content: center; }
+    .outwrap canvas, .outwrap img { max-width: 100%; max-height: 440px; display: block; }
+    .outempty { color: var(--muted); font-size: 13px; }
+    .stats { display: flex; gap: 22px; margin-top: 12px; flex-wrap: wrap; }
+    .stat b { font-size: 18px; font-weight: bold; display: block; }
+    .stat span { font-size: 11px; color: var(--muted); }
+    .results { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .result { width: 82px; cursor: pointer; border: 2px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card2); }
+    .result.sel { border-color: var(--accent); }
+    .result img { width: 100%; height: 50px; object-fit: cover; display: block; }
+    .result .rl { font-size: 10px; color: var(--muted); padding: 3px 5px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dlrow { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .warnbox { font-size: 12px; color: var(--warn-fg); background: var(--warn-bg); border: 1px solid #c79100; border-radius: 6px; padding: 9px 11px; margin-top: 10px; line-height: 1.6; }
+
+    /* ── debug visualization overlay ─────────── */
+    #debug-overlay { position: fixed; top: 60px; right: 20px; width: 400px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; z-index: 9999; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+    .debug-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .debug-toggle { background: var(--card2); border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; }
+    .debug-toggle:hover { border-color: var(--accent); }
+    .debug-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+    .stat-box { background: var(--card2); border-radius: 5px; padding: 6px 8px; min-width: 88px; }
+    .stat-label { color: var(--muted); font-size: 10px; margin-bottom: 2px; }
+    .stat-value { color: var(--text); font-weight: bold; font-size: 14px; }
+    .debug-log { max-height: 240px; overflow-y: auto; background: var(--input); padding: 8px; border-radius: 5px; font-size: 11px; line-height: 1.5; color: var(--text); }
+    .debug-entry { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .debug-entry:last-child { border: none; margin: 0; padding: 0; }
+    .debug-match-count { color: var(--ok-fg); }
+
+    /* ── footer / guide ─────────────────────── */
+    details.guide { border: 1px solid var(--border); border-radius: 6px; background: var(--card); margin-top: 6px; }
+    details.guide summary { cursor: pointer; padding: 10px 14px; font-weight: bold; font-size: 14px; color: var(--link); }
+    .gbody { padding: 0 14px 14px; }
+    .gbody p { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 10px; }
+    .guide pre { padding: 12px; overflow-x: auto; font-size: 11.5px; line-height: 1.7; color: var(--text); background: var(--input); border: 1px solid var(--border); border-radius: 6px; }
+    .foot { margin-top: 14px; font-size: 11px; color: var(--muted); line-height: 1.6; padding: 0 2px 20px; }
+</style>
+<script>
+    // Apply the saved theme before first paint (dark by default)
+    document.documentElement.dataset.theme = localStorage.getItem('panostitch.theme') || 'dark';
+</script>
+</head>
+<body>
+<div>
+    <div class="w3-container w3-indigo w3-card-8">
+        <header>
+            <h4>PANOSTITCH</h4>
+            <p>Automatic multi-photo panorama stitching — RaCo-ALIKED + LightGlue+ control points, pairwise RANSAC, focal/rotation estimation and rectilinear / cylindrical / equirectangular rendering, running entirely in your browser</p>
+        </header>
+    </div>
+    <!--<div class="w3-container w3-tiny" id="myname">by Jonathan Colledge</div> -->
+    <br><br>
+    <div class="w3-topnav w3-card-2">
+        <a href="rawdemosaic.html" target="_blank">RAW processing app (opens in new tab)</a>
+        <button id="theme-btn" class="link-btn">Light mode</button>
+    </div>
+    <div class="w3-container">
+        <div class="row" style="justify-content:space-between;margin-top:14px">
+            <div class="leds">
+                <div class="led" id="led-gpu"><i></i><span id="gpu-label">GPU…</span></div>
+                <div class="led" id="led-models"><i></i><span>MODELS</span></div>
+            </div>
+            <div class="hint" style="margin:0">🔒 photos never leave this tab — no uploads, no servers</div>
+        </div>
+
+        <div class="layout" id="layout">
+            <div class="col">
+                <div class="card">
+                    <h4 class="w3-indigo w3-card-2">1. Photos</h4>
+                    <div class="drop" id="drop">
+                        <h3>Drop photos here</h3>
+                        <p>or click to browse · JPG / PNG / TIFF (8/16-bit)<br>any order, any count — overlaps are found automatically</p>
+                        <input type="file" id="file" accept=".jpg,.jpeg,.jfif,.png,.webp,.tif,.tiff,image/jpeg,image/png,image/webp,image/tiff" multiple hidden>
+                    </div>
+                    <div class="hint" id="count">0 images</div>
+                    <div class="shots" id="shots"></div>
+                    <div class="row">
+                        <label class="mini">Resolution
+                            <select id="quality">
+                                <option value="1280">1280 fast</option>
+                                <option value="2048" selected>2048 balanced</option>
+                                <option value="3072">3072 high</option>
+                            </select>
+                        </label>
+                        <label class="mini">Projection
+                            <select id="projection">
+                                <option value="auto" selected>auto</option>
+                                <option value="rectilinear">rectilinear</option>
+                                <option value="cylindrical">cylindrical</option>
+                                <option value="equirectangular">equirectangular</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="row">
+                        <label class="mini"><input type="checkbox" id="high-res" checked> High-res mode (unlimited resolution)</label>
+                    </div>
+                    <div class="row">
+                        <label class="mini"><input type="checkbox" id="exposure-match"> Exposure matching</label>
+                    </div>
+                    <div class="row">
+                        <label class="mini"><input type="checkbox" id="flip-vertical" checked> Flip vertically</label>
+                        <button class="btn btn-small drawer-btn" id="clear">Clear</button>
+                    </div>
+                    <div class="row">
+                        <label class="mini"><input type="checkbox" id="low-memory"> Low memory mode (mobile)</label>
+                    </div>
+                    <div class="hint" id="low-memory-hint" style="display:none">Caps each photo's working resolution and avoids keeping full-resolution copies in memory once they're no longer needed. Overrides high-res mode while on. The 512-keypoint model is the lightest choice to pair with it.</div>
+                    <div class="row">
+                        <label class="mini"><input type="checkbox" id="force-wasm"> Force WASM (skip WebGPU)</label>
+                    </div>
+                    <div class="hint" id="force-wasm-hint" style="display:none">Skips WebGPU and runs the model on WASM instead — a harder but more predictable memory ceiling, at the cost of being noticeably slower (and currently single-threaded). Independent of low memory mode, so you can test the two separately on a device that's struggling.</div>
+                    <button class="btn btn-indigo btn-full" id="stitch" disabled>Stitch panorama</button>
+
+                    <div style="margin-top:12px;text-align:center">
+                        <button class="debug-toggle" onclick="toggleDebug()" id="debug-btn">Show debug info</button>
+                    </div>
+
+                    <div id="debug-overlay" class="hidden">
+                        <div class="debug-header">
+                            <span style="font-weight:bold;font-size:12px">🔍 Control point debugger</span>
+                            <button class="debug-toggle" onclick="toggleDebug()">Hide</button>
+                        </div>
+                        <div class="debug-stats">
+                            <div class="stat-box">
+                                <div class="stat-label">PAIRS PROCESSED</div>
+                                <div class="stat-value" id="dbg-pairs-processed">0</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">TOTAL MATCHES</div>
+                                <div class="stat-value" id="dbg-total-matches">0</div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">AVG INLIER RATIO</div>
+                                <div class="stat-value" id="dbg-avg-inlier-ratio">0%</div>
+                            </div>
+                        </div>
+                        <div class="debug-log" id="debug-log"></div>
+                    </div>
+
+                    <div class="hint" id="prog-label" style="display:none"></div>
+                    <div class="prog" id="prog"><i></i></div>
+                </div>
+
+                <div class="card">
+                    <h4 class="w3-indigo w3-card-2">2. Engine</h4>
+                    <div class="slot">
+                        <div class="shead">
+                            <div class="sname">RaCo-ALIKED + LightGlue+<small>fused extractor-matcher pipeline · one ONNX call per pair</small></div>
+                            <div class="st" id="st-model"><i></i><span>NOT LOADED</span></div>
+                        </div>
+                        <div class="row" style="margin-top:0">
+                            <button class="btn btn-small btn-indigo" id="folder-btn">Choose models folder…</button>
+                            <button class="btn btn-small hidden" id="reconnect-btn">Reconnect folder</button>
+                            <input type="file" id="folder-input" webkitdirectory multiple hidden>
+                        </div>
+                        <div class="hint" id="folder-line">Point this at your models folder (in Photo Suite: <b>models\panoramamaker</b>, filled by panostitch_setup_models.py), or wherever you keep the .onnx files.</div>
+                        <div class="mlist" id="model-list"></div>
+                        <div class="row" style="margin-top:0">
+                            <label class="mini">Keypoints
+                                <select id="kpick"></select>
+                            </label>
+                            <label class="mini">Matcher
+                                <select id="matcher-mode">
+                                    <option value="auto">AUTO (ALIKED→SIFT)</option>
+                                    <option value="aliked">ALIKED only</option>
+                                    <option value="sift">SIFT only (no model — low memory)</option>
+                                </select>
+                            </label>
+                            <button class="btn btn-small drawer-btn" id="b-manual">…or load one .onnx file</button>
+                            <input type="file" id="f-manual" accept=".onnx" hidden>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col">
+                <div class="card">
+                    <h4 class="w3-indigo w3-card-2">3. Console</h4>
+                    <div class="console" id="log"></div>
+                </div>
+                <div class="card">
+                    <h4 class="w3-indigo w3-card-2">4. Output <span id="out-pnote" style="font-weight:normal;font-size:12px;float:right">—</span></h4>
+                    <div class="outwrap" id="outwrap">
+                        <span class="outempty" id="outempty">— no panorama yet —</span>
+                        <canvas id="out" style="display:none"></canvas>
+                    </div>
+                    <div class="stats">
+                        <div class="stat"><b id="st-size">—</b><span>output px</span></div>
+                        <div class="stat"><b id="st-proj">—</b><span>projection</span></div>
+                        <div class="stat"><b id="st-inl">—</b><span>total inliers</span></div>
+                        <div class="stat"><b id="st-time">—</b><span>stitch time</span></div>
+                        <div class="stat"><b id="st-be">—</b><span>backend</span></div>
+                    </div>
+                    <div class="results hidden" id="results"></div>
+                    <div class="dlrow hidden" id="dlrow">
+                        <button class="btn btn-small drawer-btn" id="dl-tiff">↓ TIFF 16-bit</button>
+                        <button class="btn btn-small drawer-btn" id="dl-jpg">↓ JPEG</button>
+                        <button class="btn btn-small drawer-btn" id="dl-png">↓ PNG</button>
+                        <button class="btn btn-small drawer-btn" id="dl-layers" title="One transparent PNG per photo, each the full panorama size and already aligned — stack them in an image editor to hand-fix ghosting">↓ Aligned layers (ZIP)</button>
+                    </div>
+                    <div class="warnbox hidden" id="warnbox"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h4 class="w3-indigo w3-card-2">5. Zenith / nadir patches</h4>
+            <p class="hint">Extract the zenith (straight up) and nadir (straight down) poles of an equirectangular panorama as flat patches — e.g. for inpainting in another app — then load the processed patches back and composite them into the equirectangular image.</p>
+            <div class="row">
+                <button class="btn btn-small btn-indigo" id="pole-use-result">Use current panorama result</button>
+                <button class="btn btn-small drawer-btn" id="pole-load-btn">…or load an equirectangular image</button>
+                <input type="file" id="pole-load-input" accept=".jpg,.jpeg,.jfif,.png,.webp,.tif,.tiff,image/jpeg,image/png,image/webp,image/tiff" hidden>
+            </div>
+            <div class="hint" id="pole-src-info">No equirectangular image loaded yet.</div>
+            <div class="row">
+                <label class="mini">Patch FOV (°)
+                    <input type="text" id="pole-fov" value="110" style="width:56px">
+                </label>
+                <label class="mini">Patch size
+                    <select id="pole-size">
+                        <option value="1024">1024px</option>
+                        <option value="2048" selected>2048px</option>
+                        <option value="4096">4096px</option>
+                    </select>
+                </label>
+                <label class="mini">Blend feather (°)
+                    <input type="text" id="pole-feather" value="8" style="width:48px">
+                </label>
+            </div>
+            <div class="row">
+                <button class="btn btn-small btn-indigo" id="pole-extract-zenith" disabled>Extract zenith</button>
+                <button class="btn btn-small btn-indigo" id="pole-extract-nadir" disabled>Extract nadir</button>
+            </div>
+            <div class="results hidden" id="pole-extract-preview"></div>
+
+            <p class="hint" style="margin-top:14px">After processing the extracted images externally, load them back here — using the <b>same FOV and patch size</b> you extracted with — and composite them into the equirectangular image:</p>
+            <div class="row">
+                <button class="btn btn-small drawer-btn" id="pole-reimport-zenith-btn">Load processed zenith…</button>
+                <input type="file" id="pole-reimport-zenith-input" accept="image/*" hidden>
+                <button class="btn btn-small drawer-btn" id="pole-reimport-nadir-btn">Load processed nadir…</button>
+                <input type="file" id="pole-reimport-nadir-input" accept="image/*" hidden>
+                <button class="btn btn-indigo" id="pole-composite" disabled>Composite into equirectangular</button>
+            </div>
+            <div class="hint" id="pole-reimport-info"></div>
+            <div class="outwrap" id="pole-outwrap" style="margin-top:12px">
+                <span class="outempty" id="pole-outempty">— no composited result yet —</span>
+                <canvas id="pole-out" style="display:none"></canvas>
+            </div>
+            <div class="dlrow hidden" id="pole-dlrow">
+                <button class="btn btn-small drawer-btn" id="pole-dl-tiff">↓ TIFF 16-bit</button>
+                <button class="btn btn-small drawer-btn" id="pole-dl-jpg">↓ JPEG</button>
+                <button class="btn btn-small drawer-btn" id="pole-dl-png">↓ PNG</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h4 class="w3-indigo w3-card-2">6. Add a photo to a panorama</h4>
+            <p class="hint">Warp an extra photo into a finished panorama — one that was left out, or one that covers a gap. The photo and panorama can be any sizes; they're matched with SIFT, which handles the scale difference and needs no model. Exact on rectilinear panoramas; on cylindrical/equirectangular ones it's a close approximation around the overlap. Each result becomes the new panorama, so you can add several photos in turn.</p>
+            <div class="row">
+                <button class="btn btn-small btn-indigo" id="addp-use-result">Use current panorama result</button>
+                <button class="btn btn-small drawer-btn" id="addp-load-pano-btn">…or load a panorama image</button>
+                <input type="file" id="addp-load-pano" accept=".jpg,.jpeg,.jfif,.png,.webp,.tif,.tiff,image/jpeg,image/png,image/webp,image/tiff" hidden>
+            </div>
+            <div class="hint" id="addp-pano-info">No panorama loaded yet.</div>
+            <div class="row">
+                <button class="btn btn-small drawer-btn" id="addp-load-photo-btn">Choose photo to add…</button>
+                <input type="file" id="addp-load-photo" accept=".jpg,.jpeg,.jfif,.png,.webp,.tif,.tiff,image/jpeg,image/png,image/webp,image/tiff" hidden>
+                <label class="mini">Blend
+                    <select id="addp-mode">
+                        <option value="top">On top, feathered edges</option>
+                        <option value="fill">Only fill empty areas</option>
+                    </select>
+                </label>
+            </div>
+            <div class="hint" id="addp-photo-info">No photo chosen yet.</div>
+            <button class="btn btn-indigo" id="addp-run" disabled>Add photo to panorama</button>
+            <div class="outwrap" style="margin-top:12px">
+                <span class="outempty" id="addp-outempty">— no result yet —</span>
+                <canvas id="addp-out" style="display:none"></canvas>
+            </div>
+            <div class="hint" id="addp-result-info"></div>
+            <div class="dlrow hidden" id="addp-dlrow">
+                <button class="btn btn-small drawer-btn" id="addp-dl-tiff">↓ TIFF 16-bit</button>
+                <button class="btn btn-small drawer-btn" id="addp-dl-jpg">↓ JPEG</button>
+                <button class="btn btn-small drawer-btn" id="addp-dl-png">↓ PNG (keeps transparency)</button>
+            </div>
+        </div>
+
+        <details class="guide">
+            <summary>Where do the ONNX models come from, and how does this actually work?</summary>
+            <div class="gbody">
+                <p>PANOSTITCH runs <a href="https://github.com/fabio-sim/LightGlue-ONNX" target="_blank" rel="noopener">fabio-sim/LightGlue-ONNX</a>'s <b>RaCo-ALIKED-LightGlue+</b> pipeline models (v3.0 release) — a single fused ONNX graph that does feature extraction <em>and</em> matching for an image pair in one call. These are the exact same weights used by that project's own official browser (WebGPU/ONNX Runtime Web) demo, so the graph is already proven to run outside Python. Photo Suite&#39;s <b>models\panoramamaker</b> folder (filled by panostitch_setup_models.py) holds all seven keypoint variants; pick a different folder with the button above, or let the page download a variant straight from the GitHub release (cached after the first time). Bigger K = more keypoints = better matches on wide-baseline or low-texture scenes, at the cost of speed.</p>
+                <p><b>Unordered stitching:</b> every photo is matched against every other photo, at a fixed 1280px matching resolution, so the drop order never matters. (An earlier version pre-screened pairs at a lower resolution first, but LightGlue's attention cost is dominated by the model's fixed keypoint budget rather than image size, so that screening pass cost almost as much as the real match — it was removed as pure overhead.) Matches become edges in a graph; PANOSTITCH keeps the highest-confidence spanning tree per connected group of photos and reports photos that didn't overlap with anything as unmatched, rather than guessing. Matching always happens at that fixed size regardless of the RES setting — ALIKED's backbone runs at full image resolution (not an 8x-downsampled grid like classic SuperPoint), so matching at your output resolution directly would need far more memory than finding the alignment needs; RES only controls how big the final composited panorama is, the same way desktop stitchers find control points on a small preview and render from the full-size originals.</p>
+                <p><b>Camera model:</b> each accepted pairwise match gives a homography. From the whole graph, PANOSTITCH estimates one shared focal length and a 3D rotation per photo (the same simplifying assumption AutoStitch/Hugin use for a single lens), then renders onto your chosen projection — <b>rectilinear</b> for a flat, narrow-angle result; <b>cylindrical</b> for a classic wide horizontal panorama; <b>equirectangular</b> for full spherical/360° coverage. "Auto" picks cylindrical or equirectangular from how wide the estimated rotations spread. Seams are blended by distance-weighted feathering; an optional per-photo exposure-gain correction (off by default — enable it with the checkbox) can be solved across the match graph if your source photos have visibly inconsistent exposure, though it's estimated from just a handful of sample points per pair and can misfire on scenes with strong local lighting differences. This is pairwise-homography initialization only — there's no global bundle-adjustment refinement pass (yet), so very large or very wide-baseline sets will drift a bit more than a dedicated desktop tool like Hugin.</p>
+                <pre id="model-urls">https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k512.onnx
+https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k1024.onnx
+https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k1536.onnx
+https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k2048.onnx
+https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k2560.onnx
+https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k3072.onnx
+https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/raco_aliked_lightglue_pipeline_k3584.onnx</pre>
+                <div class="row" style="margin-top:0"><button class="btn btn-small drawer-btn" id="copy-urls">copy URLs</button><span class="hint">save any of these into your models folder by hand if you'd rather not use the in-page downloader</span></div>
+            </div>
+        </details>
+        <p class="foot">Everything above runs on this device — no uploads, no servers, no telemetry. TIFF output is 16-bit uncompressed with no colour-management assumptions beyond sRGB. If a model 404s or a group of photos fails to align, the console tells you why. PANOSTITCH v2.0</p>
+    </div>
+</div>
+
+<script type="module">
+/* ════════════════════════════════════════════════════════════
+   PANOSTITCH — unordered multi-photo panorama stitching with
+   RaCo-ALIKED+LightGlue+ (ONNX Runtime Web), a pairwise match
+   graph, rotation/focal estimation, rectilinear / cylindrical /
+   equirectangular projection rendering (WebGL2, weighted-
+   feather blend + exposure gain) and TIFF/JPEG/PNG export.
+   ════════════════════════════════════════════════════════════ */
+const $  = s => document.querySelector(s);
+const logEl = $('#log');
+
+function log(level, msg){
+  const d = document.createElement('div');
+  d.className = 'll ' + level;
+  const t = new Date();
+  const ts = [t.getHours(),t.getMinutes(),t.getSeconds()].map(v=>String(v).padStart(2,'0')).join(':');
+  d.innerHTML = `<span class="t">${ts}</span><span class="m"></span>`;
+  d.querySelector('.m').textContent = msg;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+/* ── Debug Visualization Functions ─────────── */
+function toggleDebug(){
+  const overlay = $('#debug-overlay');
+  const btn = $('#debug-btn');
+  if (overlay.classList.contains('hidden')){
+    overlay.classList.remove('hidden');
+    btn.textContent = 'HIDE DEBUG INFO';
+    updateDebugStats();
+  } else {
+    overlay.classList.add('hidden');
+    btn.textContent = 'SHOW DEBUG INFO';
+  }
+}
+
+function updateDebugStats(){
+  const stats = S.debug;
+  $('#dbg-pairs-processed').textContent = stats.pairsProcessed.toString();
+  $('#dbg-total-matches').textContent = stats.totalMatches.toLocaleString();
+
+  if (stats.inlierRatios.length > 0){
+    const avgRatio = stats.inlierRatios.reduce((a,b)=>a+b,0) / stats.inlierRatios.length;
+    $('#dbg-avg-inlier-ratio').textContent = (avgRatio * 100).toFixed(1) + '%';
+  } else {
+    $('#dbg-avg-inlier-ratio').textContent = '0%';
+  }
+}
+
+function logDebugEntry(pairA, pairB, matcher, matches, inliers, ratio){
+  const logEl = $('#debug-log');
+  if (!logEl) return;
+
+  const entry = document.createElement('div');
+  entry.className = 'debug-entry';
+
+  const matcherColor = matcher === 'aliked' ? '#59c2ff' : '#ffb454';
+  const inlierStatus = ratio >= 0.25 ? '#4fd6a5' : ratio >= 0.15 ? '#ffd166' : '#ff6b5e';
+
+  entry.innerHTML = `
+    <div style="color:#fff;margin-bottom:3px">
+      <span>${pairA} ↔ ${pairB}</span>
+      <span style="color:${matcherColor};margin-left:8px">[${matcher}]</span>
+    </div>
+    <div style="display:flex;gap:16px;font-size:9px">
+      <span><span class="debug-match-count">${matches.toLocaleString()}</span> matches</span>
+      <span><span class="debug-inlier-ratio" style="color:${inlierStatus}">${(ratio*100).toFixed(1)}%</span> inliers (${inliers}/${Math.max(1,matches)})</span>
+    </div>
+  `;
+
+  logEl.insertBefore(entry, logEl.firstChild);
+
+  // Keep only last 20 entries
+  while (logEl.children.length > 20) {
+    logEl.removeChild(logEl.lastChild);
+  }
+}
+function setLed(id, cls){ document.getElementById(id).className = 'led ' + cls; }
+// A single ONNX inference call (one pair's match, or the WebGL render of one photo) can run
+// for tens of seconds with no intermediate signal to hook into, so a bar that only moves once
+// per pair looks frozen for that whole stretch. Every setProgress call restarts a 1s ticker
+// that appends live elapsed time to the label, so something visibly updates the entire time,
+// even though the underlying fraction can't get any finer-grained than "which pair/phase".
+let _heartbeat = null;
+function setProgress(frac, label){
+  const bar = $('#prog'), lbl = $('#prog-label');
+  if (_heartbeat){ clearInterval(_heartbeat); _heartbeat = null; }
+  if (frac == null){ bar.classList.remove('on'); lbl.style.display = 'none'; return; }
+  bar.classList.add('on'); $('#prog i').style.width = (Math.max(0,Math.min(1,frac))*100) + '%';
+  lbl.style.display = 'block'; lbl.textContent = label;
+  const t0 = performance.now();
+  _heartbeat = setInterval(() => { lbl.textContent = `${label} — ${((performance.now()-t0)/1000).toFixed(0)}s elapsed`; }, 1000);
+}
+function fmtMB(bytes){ return (bytes/1048576).toFixed(1) + ' MB'; }
+function errMsg(e){
+  if (e == null) return 'unknown error';
+  if (typeof e === 'string') return e;
+  if (e.message) return e.message;
+  try{ const s = JSON.stringify(e); if (s && s !== '{}') return s; }catch{}
+  try{ return String(e); }catch{ return 'unknown error'; }
+}
+
+const KCATALOG = [512,1024,1536,2048,2560,3072,3584];
+const RELEASE_BASE = 'https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/';
+
+const S = {
+  shots: [], quality: 2048, projection: 'auto', busy: false,
+  ort: null, session: null, sessionKey: null,
+  models: {}, manualModel: null,
+  gl: null, glBlend: null, glFinal: null,
+  results: [], selResult: -1, wasmOnly: false,
+
+  // Settings
+  highResMode: true,
+  exposureMatch: false,
+  flipVertical: true,
+  lowMemoryMode: false,
+  forceWasm: false,
+
+  // Debug tracking
+  debug: {
+    pairsProcessed: 0,
+    totalMatches: 0,
+    inlierRatios: []
+  },
+
+  // Zenith/nadir pole-patch tool
+  pole: {
+    srcCanvas: null, srcW: 0, srcH: 0,
+    fov: 110, size: 2048,
+    zenithPatch: null, nadirPatch: null,
+    resultCanvas: null, resultW: 0, resultH: 0
+  }
+};
+let shotId = 0;
+
+/* ── boot ─────────────────────────────────────────────────── */
+async function boot(){
+  log('info','PANOSTITCH v2.0 — local panorama engine');
+  log('info','loading onnxruntime-web …');
+  try{
+    S.ort = await import('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.mjs');
+    S.ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
+    S.ort.env.wasm.numThreads = 1;
+    const gpu = !!navigator.gpu;
+    setLed('led-gpu', gpu ? 'on' : 'warn');
+    $('#gpu-label').textContent = gpu ? 'WEBGPU' : 'WASM';
+    log(gpu ? 'ok' : 'warn', gpu ? 'WebGPU available — GPU inference ready' : 'WebGPU not found — will fall back to WASM (slower)');
+  }catch(e){
+    log('err','failed to load onnxruntime-web: ' + errMsg(e));
+  }
+  renderKpick();
+  await restoreFolder();
+  log('info','add photos (any order), choose a keypoint size, then STITCH');
+}
+
+/* ══════════════════════ MODELS FOLDER ══════════════════════ */
+async function walkDir(dir, prefix, out, depth){
+  for await (const [name, h] of dir.entries()){
+    const path = prefix + name;
+    if (h.kind === 'file'){ if (/^raco_aliked_lightglue_pipeline_k\d+\.onnx$/i.test(name)) out.push({ name, getFile: () => h.getFile() }); }
+    else if (depth < 3) await walkDir(h, path + '/', out, depth + 1);
+  }
+}
+async function useDirHandle(handle){
+  const entries = [];
+  await walkDir(handle, '', entries, 0);
+  S.models = {};
+  for (const e of entries){
+    const m = /^raco_aliked_lightglue_pipeline_(k\d+)\.onnx$/i.exec(e.name);
+    if (m) S.models[m[1].toLowerCase()] = e;
+  }
+  renderModelList(handle.name);
+  renderKpick();
+  log(entries.length ? 'ok' : 'warn', entries.length ? `models folder "${handle.name}": found ${entries.length} weight file(s)` : `models folder "${handle.name}": no raco_aliked_lightglue_pipeline_k*.onnx files found`);
+}
+function idbOpen(){ return new Promise((res, rej) => { const r = indexedDB.open('panostitch', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+async function kvSet(k, v){ const db = await idbOpen(); return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); }
+async function kvGet(k){ const db = await idbOpen(); return new Promise((res, rej) => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+
+$('#folder-btn').onclick = async () => {
+  if (window.showDirectoryPicker){
+    try{
+      const h = await window.showDirectoryPicker({ id: 'panostitch-models', mode: 'read' });
+      await useDirHandle(h);
+      try{ await kvSet('models-dir', h); }catch{}
+      $('#reconnect-btn').classList.add('hidden');
+    }catch(e){ if (e.name !== 'AbortError') log('err','could not open that folder: ' + errMsg(e)); }
+  } else $('#folder-input').click();
+};
+$('#folder-input').onchange = () => {
+  const files = Array.from($('#folder-input').files).filter(f => /^raco_aliked_lightglue_pipeline_k\d+\.onnx$/i.test(f.name));
+  S.models = {};
+  for (const f of files){ const m = /^raco_aliked_lightglue_pipeline_(k\d+)\.onnx$/i.exec(f.name); if (m) S.models[m[1].toLowerCase()] = { name: f.name, getFile: async () => f }; }
+  const root = $('#folder-input').files.length ? $('#folder-input').files[0].webkitRelativePath.split('/')[0] : 'folder';
+  renderModelList(root); renderKpick();
+  log(files.length ? 'ok' : 'warn', `models folder: found ${files.length} weight file(s)`);
+};
+$('#reconnect-btn').onclick = async () => {
+  const h = await kvGet('models-dir');
+  if (!h) return;
+  try{ if ((await h.requestPermission({ mode: 'read' })) === 'granted'){ await useDirHandle(h); $('#reconnect-btn').classList.add('hidden'); } }
+  catch(e){ log('err','could not reconnect the models folder: ' + errMsg(e)); }
+};
+async function restoreFolder(){
+  try{
+    const h = await kvGet('models-dir');
+    if (!h) return;
+    if ((await h.queryPermission({ mode: 'read' })) === 'granted') await useDirHandle(h);
+    else { $('#reconnect-btn').textContent = `reconnect "${h.name}"`; $('#reconnect-btn').classList.remove('hidden'); }
+  }catch{}
+}
+$('#b-manual').onclick = () => $('#f-manual').click();
+$('#f-manual').onchange = () => {
+  const f = $('#f-manual').files[0];
+  if (!f) return;
+  S.manualModel = { name: f.name, getFile: async () => f };
+  renderKpick();
+  $('#kpick').value = 'manual';
+  log('ok', `manual model "${f.name}" ready to use`);
+};
+function renderModelList(rootName){
+  const el = $('#model-list'); el.innerHTML = '';
+  const found = Object.keys(S.models);
+  if (!found.length){ el.innerHTML = `<div class="mitem missing">no weight files found in "${rootName}"</div>`; return; }
+  for (const k of found.sort((a,b)=>parseInt(a.slice(1))-parseInt(b.slice(1)))){
+    const d = document.createElement('div'); d.className = 'mitem';
+    d.innerHTML = `<span>${k.slice(1)} keypoints</span><b>found</b>`;
+    el.appendChild(d);
+  }
+}
+function renderKpick(){
+  const sel = $('#kpick'); const prev = sel.value;
+  sel.innerHTML = '';
+  for (const k of KCATALOG){
+    const key = 'k'+k;
+    const opt = document.createElement('option'); opt.value = key;
+    opt.textContent = `${k}` + (S.models[key] ? ' · local' : ' · downloads ~65MB');
+    sel.appendChild(opt);
+  }
+  if (S.manualModel){ const opt = document.createElement('option'); opt.value='manual'; opt.textContent = S.manualModel.name + ' (manual)'; sel.appendChild(opt); }
+  if (prev && [...sel.options].some(o=>o.value===prev)) sel.value = prev;
+  else sel.value = S.models['k512'] ? 'k512' : (KCATALOG.includes(512) ? 'k512' : sel.options[0].value);
+}
+
+/* ══════════════════════ MODEL LOADING ══════════════════════ */
+async function modelBytes(key){
+  if (key === 'manual'){
+    if (!S.manualModel) throw new Error('No manual model loaded');
+    return await (await S.manualModel.getFile()).arrayBuffer();
+  }
+  const file = S.models[key];
+  if (file) return await (await file.getFile()).arrayBuffer();
+  const name = `raco_aliked_lightglue_pipeline_${key}.onnx`;
+  try{ const r = await fetch('models/' + name); if (r.ok) return await r.arrayBuffer(); }catch{}
+  let cache = null;
+  try{ cache = await caches.open('panostitch-models'); const hit = await cache.match(name); if (hit) return await hit.arrayBuffer(); }catch{}
+  const url = RELEASE_BASE + name;
+  log('info', `downloading ${name} from the GitHub release …`);
+  let r;
+  try{ r = await fetch(url); }catch(e){ r = null; }
+  if (!r || !r.ok) throw new Error(`Could not download ${name} (HTTP ${r?r.status:'network error'}). Put it in your models folder instead.`);
+  const total = +r.headers.get('content-length') || 0, reader = r.body.getReader(), parts = [];
+  let got = 0;
+  $('#prog').classList.add('on');
+  for (;;){
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value); got += value.length;
+    if (total) $('#prog i').style.width = (100*got/total) + '%';
+    if (got % (8*1048576) < value.length) log('info', `downloading ${name}: ${fmtMB(got)}${total?' of '+fmtMB(total):''}`);
+  }
+  $('#prog').classList.remove('on'); $('#prog i').style.width='0%';
+  const blob = new Blob(parts);
+  try{ if (cache) await cache.put(name, new Response(blob)); }catch{}
+  return await blob.arrayBuffer();
+}
+async function ensureSession(key){
+  if (S.sessionKey === key && S.session) return S.session;
+  const st = $('#st-model'); st.className = 'st load'; st.querySelector('span').textContent = 'LOADING';
+  try{
+    const tBytes0 = performance.now();
+    const bytes = await modelBytes(key);
+    const tBytes = (performance.now()-tBytes0)/1000;
+    // "Force WASM" is a separate, explicit opt-out of WebGPU — whether that's actually worth
+    // it on a given device is unclear (WASM is slower, especially single-threaded as this
+    // runs; but recovering from a failed WebGPU shader mid-run, via forceWasmFallback below,
+    // itself briefly needs a second copy of the runtime resident). Kept independent of low
+    // memory mode so the two can be tested separately rather than guessed at together.
+    const eps = (navigator.gpu && !S.wasmOnly && !S.forceWasm) ? ['webgpu','wasm'] : ['wasm'];
+    // Session creation isn't just reading the file — the WebGPU backend has to compile a WGSL
+    // shader pipeline for every distinct op/shape combination in the graph before it can run.
+    // That compile cost depends on the graph's STRUCTURE (how many attention/matmul layers
+    // LightGlue has), not on K (the keypoint count) — a k512 model has the exact same graph as
+    // a k3584 one, just smaller tensors, so this step is roughly the same length regardless of
+    // which size you pick. This is a known characteristic of onnxruntime-web + WebGPU, not
+    // something wrong with this page.
+    const tSess0 = performance.now();
+    const sess = await S.ort.InferenceSession.create(bytes, { executionProviders: eps, graphOptimizationLevel: 'all' });
+    const tSess = (performance.now()-tSess0)/1000;
+    if (S.session){ try{ await S.session.release(); }catch{} }
+    S.session = sess; S.sessionKey = key;
+    st.className = 'st ok'; st.querySelector('span').textContent = 'READY · ' + fmtMB(bytes.byteLength);
+    setLed('led-models','on');
+    log('ok', `${key} ready · ${fmtMB(bytes.byteLength)} · loaded in ${tBytes.toFixed(1)}s, compiled in ${tSess.toFixed(1)}s · in:[${sess.inputNames.join(',')}] out:[${sess.outputNames.join(',')}]`);
+    return sess;
+  }catch(e){
+    st.className = 'st'; st.querySelector('span').textContent = 'ERROR';
+    log('err', 'model load failed: ' + errMsg(e));
+    throw e;
+  }
+}
+/* A GPU shader failure inside onnxruntime-web's WebGPU backend can leave that module
+   instance's WASM/WebGPU state broken for every later run, not just the failing one — so
+   recovering needs a genuinely fresh module import (cache-busted), not just a retry on the
+   same session. This only actually happens once per page load; later failures just retry
+   on the (already-fresh, already-wasm) current session as a cheap one-shot safety net. */
+async function forceWasmFallback(){
+  if (S.wasmOnly) return;
+  setLed('led-gpu','warn'); $('#gpu-label').textContent = 'WASM (fallback)';
+  log('warn', 'a GPU shader failed — reloading onnxruntime-web fresh, WASM-only, and retrying');
+  const ORT_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.mjs';
+  // Everything below can itself fail (a flaky fetch, more memory pressure from loading a
+  // second copy of the runtime, ...). Only commit to "already on a fresh WASM session" once
+  // every step has actually succeeded — otherwise a single flaky reload would permanently
+  // strand every later attempt on the original, still-broken session with no way back.
+  const fresh = await import(ORT_URL + '?r=' + Math.random().toString(36).slice(2));
+  fresh.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
+  fresh.env.wasm.numThreads = 1;
+  const key = S.sessionKey;
+  const bytes = await modelBytes(key);
+  const sess = await fresh.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+  try{ await S.session?.release(); }catch{}
+  S.ort = fresh; S.session = sess; S.wasmOnly = true;
+  log('ok', `${key} reloaded on WASM`);
+}
+
+/* ══════════════════════ IMAGE INTAKE ══════════════════════ */
+let _maxTex = 0;
+function maxTex(){
+  if (_maxTex) return _maxTex;
+  const g = document.createElement('canvas').getContext('webgl2') || document.createElement('canvas').getContext('webgl');
+  return _maxTex = g ? g.getParameter(g.MAX_TEXTURE_SIZE) : 4096;
+}
+async function decodeFile(file){
+  if (/\.tiff?$/i.test(file.name) || file.type === 'image/tiff'){
+    const canvas = await readTiffToCanvas(await file.arrayBuffer());
+    // Mark TIFF files as having potentially non-sRGB color space
+    canvas._hasColorProfile = true;
+    return canvas;
+  }
+  const u = URL.createObjectURL(file);
+  try{
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = u; });
+    const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+    // For non-TIFF images, browsers handle color profiles automatically in most cases
+    c.getContext('2d').drawImage(img, 0, 0);
+    return c;
+  } finally { URL.revokeObjectURL(u); }
+}
+const LOW_MEMORY_CAP = 1600; // per-photo working resolution while low memory mode is on
+async function processSource(fullCanvas){
+  const iw = fullCanvas.width, ih = fullCanvas.height;
+  // High-res mode means "render from the full-size originals", so the per-photo working
+  // canvas skips the RES cap entirely there — bounded only by the GPU's max texture size,
+  // the same way the overall output canvas is (see buildPanorama's useHighRes check). Low
+  // memory mode overrides that: it forces a modest cap regardless, since the point of the
+  // mode is staying well under a memory-constrained device's ceiling, not output quality.
+  const cap = S.lowMemoryMode ? Math.min(LOW_MEMORY_CAP, maxTex())
+    : S.highResMode ? maxTex() : Math.min(S.quality, maxTex());
+  const sc = Math.min(1, cap / Math.max(iw, ih));
+  if (sc === 1){
+    // No downscale needed — reuse the already-decoded canvas directly instead of drawing a
+    // second, pixel-identical full-resolution copy. Safe: neither canvas is ever mutated in
+    // place anywhere in this file, only read from or wholesale-replaced, so aliasing them
+    // here can't let a later write to one leak into the other. This roughly halves the
+    // filmstrip's memory footprint whenever this branch is taken (which on desktop is most of
+    // the time too, since typical photos are well under the GPU's max texture size).
+    return { w: iw, h: ih, canvas: fullCanvas };
+  }
+  const w = Math.max(2, Math.round(iw * sc)), h = Math.max(2, Math.round(ih * sc));
+  const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(fullCanvas, 0, 0, w, h);
+  return { w, h, canvas };
+}
+// ALIKED runs its CNN backbone at full image resolution, so its memory cost scales with
+// pixel count directly (unlike classic SuperPoint's 8x-downsampled grid) — matching always
+// happens at this fixed, conservative size regardless of the RES (output quality) setting,
+// the same way desktop stitchers find control points on a downscaled preview and only use
+// the full-resolution originals for the final render. The resulting homography is scaled
+// back up to each photo's own output-resolution canvas before it's used for anything else.
+const MATCH_RES = 1280;
+async function buildMatchCanvas(fullCanvas){
+  const iw = fullCanvas.width, ih = fullCanvas.height;
+  const sc = Math.min(1, MATCH_RES / Math.max(iw, ih));
+  const w = Math.max(2, Math.round(iw * sc)), h = Math.max(2, Math.round(ih * sc));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(fullCanvas, 0, 0, w, h);
+  return c;
+}
+async function addShots(files){
+  for (const file of files){
+    try{
+      const full = await decodeFile(file);
+      const p = await processSource(full);
+      const matchCanvas = await buildMatchCanvas(full);
+      const url = p.canvas.toDataURL('image/jpeg', 0.75);
+      // In low memory mode, don't hold onto the full-resolution decode once the (capped)
+      // working canvas and matching canvas are derived from it — `file` is kept instead
+      // (cheap, just a reference) so it can be re-decoded on demand if settings change later.
+      const fullCanvas = S.lowMemoryMode ? null : full;
+      S.shots.push({ id: ++shotId, name: file.name, file, fullCanvas, matchCanvas, url, ...p });
+    }catch(e){ log('err', `${file.name}: ${errMsg(e)}`); }
+  }
+  renderShots(); updateReady();
+  log('info', `filmstrip: ${S.shots.length} image(s)`);
+}
+function renderShots(){
+  const el = $('#shots'); el.innerHTML = '';
+  S.shots.forEach((s, i) => {
+    const d = document.createElement('div'); d.className = 'shot';
+    d.innerHTML = `
+      <img src="${s.url}" alt="">
+      <div><span class="idx">${String(i+1).padStart(2,'0')}</span><span class="nm" title="${s.name}">${s.name}</span>
+        <div class="dm">${s.w}×${s.h}</div></div>
+      <div class="end"><span class="rm" title="remove">✕</span></div>`;
+    d.querySelector('.rm').onclick = () => { S.shots.splice(i,1); renderShots(); updateReady(); };
+    el.appendChild(d);
+  });
+  $('#count').textContent = S.shots.length + ' image' + (S.shots.length === 1 ? '' : 's');
+}
+const drop = $('#drop');
+drop.onclick = () => $('#file').click();
+$('#file').onchange = e => addShots([...e.target.files]);
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); addShots([...e.dataTransfer.files]); });
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => { e.preventDefault(); if (e.target.closest('#drop')) return; addShots([...e.dataTransfer.files]); });
+// When low memory mode has discarded a shot's full-resolution decode, this re-derives it from
+// the original File on demand instead; outside low memory mode s.fullCanvas is always already
+// there, so this is just a passthrough — zero behaviour change for the default/desktop path.
+async function ensureFullCanvas(s){
+  return s.fullCanvas || await decodeFile(s.file);
+}
+async function reprocessShots(){
+  for (const s of S.shots){
+    const full = await ensureFullCanvas(s);
+    const p = await processSource(full);
+    Object.assign(s, p);
+    s.fullCanvas = S.lowMemoryMode ? null : full;
+  }
+  renderShots();
+}
+$('#quality').onchange = async e => {
+  S.quality = +e.target.value;
+  await reprocessShots(); log('info', `reprocessed filmstrip at ${S.quality}px`);
+};
+$('#projection').onchange = e => { S.projection = e.target.value; };
+$('#high-res').onchange = async e => {
+  S.highResMode = e.target.checked;
+  await reprocessShots();
+  log('info', `High-res mode: ${S.highResMode ? 'ON — photos will render at full source resolution' : 'OFF'}`);
+};
+$('#exposure-match').onchange = e => { S.exposureMatch = e.target.checked; log('info', `Exposure matching: ${S.exposureMatch ? 'ON' : 'OFF'}`); };
+$('#flip-vertical').onchange = e => { S.flipVertical = e.target.checked; log('info', `Flip vertical: ${S.flipVertical ? 'ON' : 'OFF'}`); };
+$('#low-memory').onchange = async e => {
+  S.lowMemoryMode = e.target.checked;
+  $('#low-memory-hint').style.display = S.lowMemoryMode ? 'block' : 'none';
+  await reprocessShots();
+  log('info', `Low memory mode: ${S.lowMemoryMode ? 'ON — capped working resolution, full-res copies not kept in memory' : 'OFF'}`);
+};
+// The execution-provider choice (WebGPU vs WASM-only) is decided once, in ensureSession, at
+// model-load time — if a model is already loaded under the "wrong" backend for a setting
+// that just changed, drop it so the next stitch reloads with the right one instead of
+// silently continuing on whatever was already running.
+async function dropSession(){
+  if (!S.session) return;
+  try{ await S.session.release(); }catch{}
+  S.session = null; S.sessionKey = null;
+  const st = $('#st-model'); st.className = 'st'; st.querySelector('span').textContent = 'NOT LOADED';
+}
+$('#force-wasm').onchange = async e => {
+  S.forceWasm = e.target.checked;
+  $('#force-wasm-hint').style.display = S.forceWasm ? 'block' : 'none';
+  await dropSession();
+  log('info', `Force WASM: ${S.forceWasm ? 'ON — WebGPU will not be used' : 'OFF'}`);
+};
+$('#clear').onclick = () => {
+  S.shots = []; renderShots(); updateReady(); log('info','filmstrip cleared');
+};
+function updateReady(){
+  const btn = $('#stitch');
+  btn.disabled = !(S.shots.length >= 2 && !S.busy);
+  if (!S.busy) btn.textContent = S.shots.length >= 2 ? `STITCH ${S.shots.length} PHOTOS` : 'STITCH PANORAMA';
+}
+
+/* ══════════════════════ TIFF READER ════════════════════════ */
+function packbitsDecode(raw, expectedLen){
+  const out = new Uint8Array(expectedLen);
+  let i = 0, o = 0;
+  while (i < raw.length && o < expectedLen){
+    const n = raw[i++]; const sn = n < 128 ? n : n - 256;
+    if (sn >= 0){ for (let k=0;k<=sn && o<expectedLen && i<raw.length;k++) out[o++] = raw[i++]; }
+    else if (sn !== -128){ const v = raw[i++]; for (let k=0;k<(1-sn) && o<expectedLen;k++) out[o++] = v; }
+  }
+  return out;
+}
+function lzwDecodeTiff(raw, expectedLen){
+  const CLEAR = 256, EOI = 257;
+  const out = new Uint8Array(expectedLen);
+  let outPos = 0, bitBuf = 0, bitCnt = 0, pos = 0;
+  const getCode = (width) => {
+    while (bitCnt < width){ if (pos >= raw.length) return EOI; bitBuf = (bitBuf << 8) | raw[pos++]; bitCnt += 8; }
+    bitCnt -= width;
+    return (bitBuf >>> bitCnt) & ((1 << width) - 1);
+  };
+  let dict, width, nextCode;
+  const reset = () => { dict = new Array(4096); for (let i=0;i<256;i++) dict[i] = [i]; nextCode = 258; width = 9; };
+  reset();
+  let prev = null;
+  while (outPos < expectedLen){
+    const code = getCode(width);
+    if (code === EOI) break;
+    if (code === CLEAR){ reset(); prev = null; continue; }
+    let entry;
+    if (code < nextCode && dict[code]) entry = dict[code];
+    else if (prev) entry = prev.concat([prev[0]]);
+    else break;
+    for (let k=0;k<entry.length && outPos<expectedLen;k++) out[outPos++] = entry[k];
+    if (prev && nextCode < 4096){
+      dict[nextCode++] = prev.concat([entry[0]]);
+      if (nextCode === 511 || nextCode === 1023 || nextCode === 2047) width++;
+    }
+    prev = entry;
+  }
+  return out;
+}
+async function inflateDeflate(raw){
+  const ds = new DecompressionStream('deflate');
+  const stream = new Blob([raw]).stream().pipeThrough(ds);
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+function undoPredictor(buf, rows, W, spp, bps, le){
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const rowBytes = W*spp*bps;
+  for (let r=0;r<rows;r++){
+    const rowStart = r*rowBytes;
+    for (let x=1;x<W;x++) for (let c=0;c<spp;c++){
+      const idx = rowStart + (x*spp+c)*bps, pidx = rowStart + ((x-1)*spp+c)*bps;
+      if (bps===1) dv.setUint8(idx, (dv.getUint8(idx)+dv.getUint8(pidx)) & 0xFF);
+      else dv.setUint16(idx, (dv.getUint16(idx,le)+dv.getUint16(pidx,le)) & 0xFFFF, le);
+    }
+  }
+}
+async function readTiffToCanvas(buf){
+  const dv = new DataView(buf);
+  const b0 = dv.getUint8(0), b1 = dv.getUint8(1);
+  let le;
+  if (b0===0x49 && b1===0x49) le = true;
+  else if (b0===0x4D && b1===0x4D) le = false;
+  else throw new Error('Not a TIFF file');
+  if (dv.getUint16(2,le) !== 42) throw new Error('Not a classic TIFF (BigTIFF is not supported)');
+  const ifdOff = dv.getUint32(4,le);
+  const tySize = {1:1,2:1,3:2,4:4,5:8,6:1,7:1,8:2,9:4,10:8,11:4,12:8};
+  const readOne = (type, off) => {
+    switch(type){
+      case 1: case 2: case 6: case 7: return dv.getUint8(off);
+      case 3: case 8: return dv.getUint16(off,le);
+      case 4: case 9: return dv.getUint32(off,le);
+      case 11: return dv.getFloat32(off,le);
+      case 5: return dv.getUint32(off,le)/dv.getUint32(off+4,le);
+      case 10: return dv.getInt32(off,le)/dv.getInt32(off+4,le);
+      default: return dv.getUint32(off,le);
+    }
+  };
+  const nE = dv.getUint16(ifdOff, le);
+  const tags = {};
+  for (let i=0;i<nE;i++){
+    const p = ifdOff + 2 + i*12;
+    const tag = dv.getUint16(p,le), type = dv.getUint16(p+2,le), count = dv.getUint32(p+4,le);
+    const sz = (tySize[type]||1) * count;
+    const valOff = sz > 4 ? dv.getUint32(p+8,le) : p+8;
+    const vals = [];
+    for (let k=0;k<count;k++) vals.push(readOne(type, valOff + k*(tySize[type]||1)));
+    tags[tag] = vals;
+  }
+  const req = (t, def) => tags[t] ? tags[t][0] : def;
+  const W = req(256), H = req(257);
+  if (!W || !H) throw new Error('TIFF is missing width/height tags');
+  const bps = req(258, 1);
+  const comp = req(259, 1);
+  const photo = req(262, 1);
+  const spp = req(277, 1);
+  const rowsPerStrip = req(278, H);
+  const stripOffsets = tags[273] || [];
+  const stripCounts = tags[279] || [];
+  const predictor = req(317, 1);
+  const planar = req(284, 1);
+  if (planar !== 1) throw new Error('Planar-configuration TIFFs are not supported — save as chunky/interleaved');
+  if (![1,5,8,32773,32946].includes(comp)) throw new Error(`Unsupported TIFF compression (code ${comp})`);
+  if (![8,16].includes(bps)) throw new Error(`Only 8-bit and 16-bit TIFF samples are supported (this file is ${bps}-bit)`);
+  if (!stripOffsets.length) throw new Error('TIFF has no strip data');
+  const bytesPerSample = bps/8;
+  const rowBytes = W*spp*bytesPerSample;
+  const raw = new Uint8Array(H*rowBytes);
+  let rowCursor = 0;
+  for (let s=0; s<stripOffsets.length && rowCursor<H; s++){
+    const rows = Math.min(rowsPerStrip, H - rowCursor);
+    const stripRaw = new Uint8Array(buf, stripOffsets[s], stripCounts[s] ?? (rowBytes*rows));
+    let dec;
+    if (comp === 1) dec = stripRaw;
+    else if (comp === 32773) dec = packbitsDecode(stripRaw, rows*rowBytes);
+    else if (comp === 5) dec = lzwDecodeTiff(stripRaw, rows*rowBytes);
+    else dec = await inflateDeflate(stripRaw);
+    if (predictor === 2) undoPredictor(dec, rows, W, spp, bytesPerSample, le);
+    raw.set(dec.subarray(0, Math.min(dec.length, rows*rowBytes)), rowCursor*rowBytes);
+    rowCursor += rows;
+  }
+  const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const id = ctx.createImageData(W, H);
+  const rdv = new DataView(raw.buffer);
+  const sample = (idx) => bytesPerSample===1 ? raw[idx] : (rdv.getUint16(idx*2, le) >> 8);
+  for (let p=0; p<W*H; p++){
+    const base = p*spp;
+    let r,g,b;
+    if (spp >= 3){ r=sample(base); g=sample(base+1); b=sample(base+2); }
+    else { let v = sample(base); if (photo===0) v = 255-v; r=g=b=v; }
+    id.data[p*4] = r; id.data[p*4+1] = g; id.data[p*4+2] = b; id.data[p*4+3] = 255;
+  }
+  ctx.putImageData(id, 0, 0);
+  return canvas;
+}
+
+/* ══════════════════════ TIFF WRITER (16-bit) ═══════════════ */
+function writeTiff16(rgbF32, w, h){ // rgbF32: Float32Array len w*h*3, values 0..1
+  const data = new Uint16Array(w*h*3);
+  for (let i=0;i<data.length;i++) data[i] = Math.max(0, Math.min(65535, Math.round(rgbF32[i]*65535)));
+  const software = new TextEncoder().encode('PANOSTITCH\0');
+  const entries = [];
+  const nE = 12, ifdSize = 2 + nE*12 + 4;
+  let extra = 8 + ifdSize;
+  const blobs = [];
+  const place = (bytes) => { const o = extra; blobs.push([o, bytes]); extra += bytes.length + (bytes.length & 1); return o; };
+  const bps = new Uint8Array(6); const bpsDv = new DataView(bps.buffer);
+  bpsDv.setUint16(0,16,true); bpsDv.setUint16(2,16,true); bpsDv.setUint16(4,16,true);
+  const res = new Uint8Array(8); new DataView(res.buffer).setUint32(0,300,true); new DataView(res.buffer).setUint32(4,1,true);
+  const bpsOff = place(bps), xresOff = place(res), yresOff = place(res.slice()), swOff = place(software);
+  const dataOff = extra, dataLen = data.length*2;
+  entries.push([256,4,1,w],[257,4,1,h],[258,3,3,bpsOff],[259,3,1,1],[262,3,1,2],[273,4,1,dataOff],
+    [274,3,1,1],[277,3,1,3],[278,4,1,h],[279,4,1,dataLen],[282,5,1,xresOff],[283,5,1,yresOff],
+    [284,3,1,1],[305,2,software.length,swOff]);
+  const head = new Uint8Array(dataOff), dv = new DataView(head.buffer);
+  head[0]=0x49; head[1]=0x49; dv.setUint16(2,42,true); dv.setUint32(4,8,true);
+  dv.setUint16(8,nE,true);
+  entries.forEach(([tag,type,count,value],i) => {
+    const p = 10+i*12;
+    dv.setUint16(p,tag,true); dv.setUint16(p+2,type,true); dv.setUint32(p+4,count,true);
+    if (type===3 && count===1) dv.setUint16(p+8,value,true); else dv.setUint32(p+8,value,true);
+  });
+  dv.setUint32(10+nE*12, 0, true);
+  for (const [o,bytes] of blobs) head.set(bytes, o);
+  const pix = new Uint8Array(data.buffer, data.byteOffset, dataLen);
+  return new Blob([head, pix], { type: 'image/tiff' });
+}
+
+/* ══════════════════════ MATCHING (ALIKED+LightGlue+) ═══════ */
+function rgbaToNchwPair(dataA, dataB, w, h){
+  const area = w*h;
+  const out = new Float32Array(2*3*area);
+  for (let p=0;p<area;p++){
+    const a = p*4, b = p*4;
+    out[p] = dataA[a]/255; out[area+p] = dataA[a+1]/255; out[2*area+p] = dataA[a+2]/255;
+    out[3*area+p] = dataB[b]/255; out[3*area+area+p] = dataB[b+1]/255; out[3*area+2*area+p] = dataB[b+2]/255;
+  }
+  return { data: out, dims: [2,3,h,w] }; // raw, not a Tensor yet — kept module-instance-agnostic for the WASM-fallback retry
+}
+function padTo(canvas, w, h){
+  if (canvas.width===w && canvas.height===h) return canvas;
+  const c = document.createElement('canvas'); c.width=w; c.height=h;
+  c.getContext('2d').drawImage(canvas,0,0);
+  return c;
+}
+const ALIGN = 32; // the ALIKED backbone's downsampling needs H/W divisible by this, or internal skip-connection concats mismatch by a few px
+function alignUp(v){ return Math.ceil(v/ALIGN)*ALIGN; }
+async function matchPair(canvasA, canvasB){
+  const w = alignUp(Math.max(canvasA.width, canvasB.width)), h = alignUp(Math.max(canvasA.height, canvasB.height));
+  const ca = padTo(canvasA,w,h), cb = padTo(canvasB,w,h);
+  const da = ca.getContext('2d',{willReadFrequently:true}).getImageData(0,0,w,h).data;
+  const db = cb.getContext('2d',{willReadFrequently:true}).getImageData(0,0,w,h).data;
+  const desc = rgbaToNchwPair(da, db, w, h);
+  const runOnce = async () => {
+    const tensor = new S.ort.Tensor('float32', desc.data, desc.dims);
+    try{ return await S.session.run({ images: tensor }); }
+    finally{ tensor.dispose?.(); }
+  };
+  let out;
+  try{ out = await runOnce(); }
+  catch(e){
+    log('warn', `inference failed at ${w}×${h} (${errMsg(e)}) — retrying`);
+    await forceWasmFallback();
+    out = await runOnce();
+  }
+  const K = out.keypoints.dims[1];
+  const kp = out.keypoints.data, mm = out.matches.data, sc = out.mscores.data;
+  const rows = out.matches.dims[0];
+  const pts = [];
+  for (let r=0;r<rows;r++){
+    if (Number(mm[r*3]) !== 0) continue;
+    const i = Number(mm[r*3+1]), j = Number(mm[r*3+2]);
+    pts.push({ x0: kp[i*2], y0: kp[i*2+1], x1: kp[(K+j)*2], y1: kp[(K+j)*2+1], score: sc[r] });
+  }
+  Object.values(out).forEach(t=>t.dispose?.());
+  return pts;
+}
+function downscaleCanvas(canvas, scale){
+  const w = Math.max(2, Math.round(canvas.width*scale)), h = Math.max(2, Math.round(canvas.height*scale));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(canvas, 0, 0, w, h);
+  return c;
+}
+/* ALIKED runs its CNN backbone at full image resolution (unlike classic SuperPoint's
+   8x-downsampled grid), so intermediate feature maps can need far more memory than the
+   source image size suggests — large photos can exceed a GPU's buffer-size limit or the
+   WASM build's memory cap even when the model itself loaded fine. Rather than guess the
+   exact ceiling, retry a failing pair at progressively smaller working sizes. */
+async function matchPairDegrading(canvasA, canvasB, label){
+  let scale = 1;
+  for (let attempt=0; attempt<4; attempt++){
+    try{
+      const a = scale<1 ? downscaleCanvas(canvasA,scale) : canvasA, b = scale<1 ? downscaleCanvas(canvasB,scale) : canvasB;
+      const pts = await matchPair(a, b);
+      if (scale<1) for (const p of pts){ p.x0/=scale; p.y0/=scale; p.x1/=scale; p.y1/=scale; }
+      return pts;
+    }catch(e){
+      if (attempt === 3) throw e;
+      scale *= 0.65;
+      log('warn', `${label}: match failed (${errMsg(e)}) — retrying at ${Math.round(scale*100)}% resolution`);
+    }
+  }
+}
+
+/* ══════════════════════ HOMOGRAPHY / RANSAC ════════════════ */
+function homRows(p){
+  return [
+    [p.x0,p.y0,1,0,0,0,-p.x1*p.x0,-p.x1*p.y0, p.x1],
+    [0,0,0,p.x0,p.y0,1,-p.y1*p.x0,-p.y1*p.y0, p.y1],
+  ];
+}
+function solveLinearSystem(A, b){
+  const n = A.length;
+  const M = A.map((row,i) => [...row, b[i]]);
+  for (let i=0;i<n;i++){
+    let maxEl = Math.abs(M[i][i]), maxRow = i;
+    for (let k=i+1;k<n;k++) if (Math.abs(M[k][i]) > maxEl){ maxEl = Math.abs(M[k][i]); maxRow = k; }
+    if (maxEl < 1e-12) throw new Error('singular');
+    [M[i], M[maxRow]] = [M[maxRow], M[i]];
+    const piv = M[i][i];
+    for (let k=i;k<=n;k++) M[i][k] /= piv;
+    for (let k=0;k<n;k++) if (k!==i){ const c = -M[k][i]; for (let j=i;j<=n;j++) M[k][j] += c*M[i][j]; }
+  }
+  return M.map(row => row[n]);
+}
+/* Hartley normalisation: the DLT on raw pixels (coords O(10^3), products O(10^6))
+   has a terrible condition number and silently loses 1-3px per fit — which
+   compounds down a chained panorama. Map both point sets to zero centroid /
+   mean distance sqrt(2), solve there, then denormalise. */
+function normalizePairPts(pts){
+  const n = pts.length;
+  let mx0=0,my0=0,mx1=0,my1=0;
+  for (const p of pts){ mx0+=p.x0; my0+=p.y0; mx1+=p.x1; my1+=p.y1; }
+  mx0/=n; my0/=n; mx1/=n; my1/=n;
+  let d0=0,d1=0;
+  for (const p of pts){ d0+=Math.hypot(p.x0-mx0,p.y0-my0); d1+=Math.hypot(p.x1-mx1,p.y1-my1); }
+  d0/=n; d1/=n;
+  const s0 = d0>1e-9 ? Math.SQRT2/d0 : 1, s1 = d1>1e-9 ? Math.SQRT2/d1 : 1;
+  return {
+    npts: pts.map(p=>({ x0:(p.x0-mx0)*s0, y0:(p.y0-my0)*s0, x1:(p.x1-mx1)*s1, y1:(p.y1-my1)*s1 })),
+    T0: [s0,0,-mx0*s0, 0,s0,-my0*s0, 0,0,1],
+    T1: [s1,0,-mx1*s1, 0,s1,-my1*s1, 0,0,1],
+  };
+}
+function denormH8(hn, T0, T1){
+  const iT1 = matInv3(T1); if (!iT1) return null;
+  const H = matMul3(matMul3(iT1, toMat3(hn)), T0);
+  if (!(Math.abs(H[8]) > 1e-12)) return null;
+  return [H[0]/H[8], H[1]/H[8], H[2]/H[8], H[3]/H[8], H[4]/H[8], H[5]/H[8], H[6]/H[8], H[7]/H[8]];
+}
+function solveHomography4(pts, idx){
+  const { npts, T0, T1 } = normalizePairPts(idx.map(i => pts[i]));
+  const A = [], b = [];
+  for (const p of npts) for (const row of homRows(p)){ A.push(row.slice(0,8)); b.push(row[8]); }
+  let h; try{ h = solveLinearSystem(A, b); }catch{ return null; }
+  return denormH8(h, T0, T1);
+}
+function solveHomographyLSQ(pts){
+  if (pts.length < 4) return null;
+  const { npts, T0, T1 } = normalizePairPts(pts);
+  const ATA = Array.from({length:8}, () => new Array(8).fill(0)), ATb = new Array(8).fill(0);
+  for (const p of npts) for (const row of homRows(p)){
+    const a = row.slice(0,8), bb = row[8];
+    for (let i=0;i<8;i++){ ATb[i] += a[i]*bb; for (let j=0;j<8;j++) ATA[i][j] += a[i]*a[j]; }
+  }
+  let h; try{ h = solveLinearSystem(ATA, ATb); }catch{ return null; }
+  return denormH8(h, T0, T1);
+}
+function ransacHomography(pts, threshold){
+  if (pts.length < 8) return null;
+  const thr2 = threshold*threshold;
+  const n = pts.length;
+  let best = null, bestCount = -1;
+  const iters = Math.min(1500, Math.max(300, n*3));
+  for (let it=0; it<iters; it++){
+    const idx = [];
+    while (idx.length < 4){ const r = Math.floor(Math.random()*n); if (!idx.includes(r)) idx.push(r); }
+    const H = solveHomography4(pts, idx);
+    if (!H) continue;
+    let count = 0;
+    for (const p of pts){
+      const d = H[6]*p.x0 + H[7]*p.y0 + 1;
+      if (Math.abs(d) < 1e-9) continue;
+      const px = (H[0]*p.x0+H[1]*p.y0+H[2])/d, py = (H[3]*p.x0+H[4]*p.y0+H[5])/d;
+      const dx = px-p.x1, dy = py-p.y1;
+      if (dx*dx+dy*dy < thr2) count++;
+    }
+    if (count > bestCount){ bestCount = count; best = H; }
+  }
+  if (!best || bestCount < 8) return null;
+  const inliers = pts.filter(p => {
+    const d = best[6]*p.x0 + best[7]*p.y0 + 1;
+    if (Math.abs(d) < 1e-9) return false;
+    const px = (best[0]*p.x0+best[1]*p.y0+best[2])/d, py = (best[3]*p.x0+best[4]*p.y0+best[5])/d;
+    const dx = px-p.x1, dy = py-p.y1;
+    return dx*dx+dy*dy < thr2;
+  });
+  const refined = solveHomographyLSQ(inliers);
+  return { H: refined || best, inliers: inliers.length, total: pts.length, inlierPts: inliers };
+}
+
+function toGrayFloat(imgData){
+  const w = imgData.width, h = imgData.height, data = imgData.data;
+  const gray = new Float32Array(w*h);
+  for (let i=0;i<data.length;i+=4) gray[i>>2] = data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
+  return gray;
+}
+
+/* ══════════════════════ SIFT MATCHER (pure JS, no model) ═══════ */
+// The SIFT below follows OpenCV's modules/features2d/src/sift.dispatch.cpp (https://github.com/opencv/opencv,
+// Apache-2.0), whose notice is reproduced here as its licence asks:
+//
+//   // This file is part of OpenCV project.
+//   // It is subject to the license terms in the LICENSE file found in the top-level directory
+//   // of this distribution and at http://opencv.org/license.html.
+//   //
+//   // Copyright (c) 2006-2010, Rob Hess <hess@eecs.oregonstate.edu>
+//   // Copyright (C) 2009, Willow Garage Inc., all rights reserved.
+//   // Copyright (C) 2020, Intel Corporation, all rights reserved.
+//
+//   /**********************************************************************************************\
+//    Implementation of SIFT is based on the code from http://blogs.oregonstate.edu/hess/code/sift/
+//    Below is the original copyright.
+//    Patent US6711293 expired in March 2020.
+//
+//   //    Copyright (c) 2006-2010, Rob Hess <hess@eecs.oregonstate.edu>
+//   //    All rights reserved.
+//
+//   //    The following patent has been issued for methods embodied in this
+//   //    software: "Method and apparatus for identifying scale invariant features
+//   //    in an image and use of same for locating an object in an image," David
+//   //    G. Lowe, US Patent 6,711,293 (March 23, 2004). Provisional application
+//   //    filed March 8, 1999. Assignee: The University of British Columbia. For
+//   //    further details, contact David Lowe (lowe@cs.ubc.ca) or the
+//   //    University-Industry Liaison Office of the University of British
+//   //    Columbia.
+//
+//   //    Note that restrictions imposed by this patent (and possibly others)
+//   //    exist independently of and may be in conflict with the freedoms granted
+//   //    in this license, which refers to copyright of the program, not patents
+//   //    for any methods that it implements.  Both copyright and patent law must
+//   //    be obeyed to legally use and redistribute this program and it is not the
+//   //    purpose of this license to induce you to infringe any patents or other
+//   //    property right claims or to contest validity of any such claims.  If you
+//   //    redistribute or use the program, then this license merely protects you
+//   //    from committing copyright infringement.  It does not protect you from
+//   //    committing patent infringement.  So, before you do anything with this
+//   //    program, make sure that you have permission to do so not merely in terms
+//   //    of copyright, but also in terms of patent law.
+//
+//   //    Please note that this license is not to be understood as a guarantee
+//   //    either.  If you use the program according to this license, but in
+//   //    conflict with patent law, it does not mean that the licensor will refund
+//   //    you for any losses that you incur if you are sued for your patent
+//   //    infringement.
+//
+//   //    Redistribution and use in source and binary forms, with or without
+//   //    modification, are permitted provided that the following conditions are
+//   //    met:
+//   //        * Redistributions of source code must retain the above copyright and
+//   //          patent notices, this list of conditions and the following
+//   //          disclaimer.
+//   //        * Redistributions in binary form must reproduce the above copyright
+//   //          notice, this list of conditions and the following disclaimer in
+//   //          the documentation and/or other materials provided with the
+//   //          distribution.
+//   //        * Neither the name of Oregon State University nor the names of its
+//   //          contributors may be used to endorse or promote products derived
+//   //          from this software without specific prior written permission.
+//
+//   //    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+//   //    IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+//   //    TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+//   //    PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+//   //    HOLDER BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+//   //    EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+//   //    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+//   //    PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+//   //    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+//   //    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+//   //    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//   \**********************************************************************************************/
+//
+// Lowe's SIFT, adapted from sift-surf.js (itself a port of OpenCV's sift.dispatch.cpp), for
+// devices that can't hold the ALIKED+LightGlue model in memory. Differences from that file:
+// the descriptor uses OpenCV's 3σ-wide cells (it used 1σ, describing a far smaller, less
+// distinctive patch), the input isn't upsampled 2x first (on a 1280px match canvas that
+// would mean a ~200MB pyramid), and each octave is fully processed — keypoints, orientation,
+// descriptors — before the next is built, so its blurred levels can be freed straight away.
+const SIFT_LAYERS = 3, SIFT_SIGMA = 1.6, SIFT_CONTRAST = 0.01, SIFT_EDGE = 10, SIFT_BORDER = 5;
+const SIFT_MAX_FEATURES = 2000, SIFT_RATIO = 0.75;
+function siftBlur(src, w, h, sigma){
+  const r = Math.max(1, Math.ceil(3*sigma)), k = new Float32Array(2*r+1);
+  let s = 0;
+  for (let i=-r;i<=r;i++){ k[i+r] = Math.exp(-(i*i)/(2*sigma*sigma)); s += k[i+r]; }
+  for (let i=0;i<k.length;i++) k[i] /= s;
+  const tmp = new Float32Array(w*h), out = new Float32Array(w*h);
+  for (let y=0;y<h;y++){
+    const row = y*w;
+    for (let x=0;x<w;x++){
+      let acc = 0;
+      for (let i=-r;i<=r;i++){ let xx = x+i; xx = xx<0 ? 0 : xx>=w ? w-1 : xx; acc += k[i+r]*src[row+xx]; }
+      tmp[row+x] = acc;
+    }
+  }
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      let acc = 0;
+      for (let i=-r;i<=r;i++){ let yy = y+i; yy = yy<0 ? 0 : yy>=h ? h-1 : yy; acc += k[i+r]*tmp[yy*w+x]; }
+      out[y*w+x] = acc;
+    }
+  }
+  return out;
+}
+// Sub-pixel/sub-scale refinement of a DoG extremum (Lowe sec. 4) + low-contrast and edge
+// rejection. Coordinates stay in this octave's pixels.
+function siftRefine(dog, layer, r, c, w, h){
+  const nD = SIFT_LAYERS + 2, postThr = SIFT_CONTRAST/SIFT_LAYERS*255;
+  let dx=0, dy=0, ds=0, i=0;
+  for (; i<5; i++){
+    const cur = dog[layer], prv = dog[layer-1], nxt = dog[layer+1], p = r*w+c, v = cur[p];
+    const gx = 0.5*(cur[p+1]-cur[p-1]), gy = 0.5*(cur[p+w]-cur[p-w]), gs = 0.5*(nxt[p]-prv[p]);
+    const dxx = cur[p+1]+cur[p-1]-2*v, dyy = cur[p+w]+cur[p-w]-2*v, dss = nxt[p]+prv[p]-2*v;
+    const dxy = 0.25*(cur[p+w+1]-cur[p+w-1]-cur[p-w+1]+cur[p-w-1]);
+    const dxs = 0.25*(nxt[p+1]-nxt[p-1]-prv[p+1]+prv[p-1]);
+    const dys = 0.25*(nxt[p+w]-nxt[p-w]-prv[p+w]+prv[p-w]);
+    const det = dxx*(dyy*dss-dys*dys) - dxy*(dxy*dss-dys*dxs) + dxs*(dxy*dys-dyy*dxs);
+    if (Math.abs(det) < 1e-10) return null;
+    const inv = 1/det;
+    const i00 = (dyy*dss-dys*dys)*inv, i01 = (dxs*dys-dxy*dss)*inv, i02 = (dxy*dys-dyy*dxs)*inv;
+    const i11 = (dxx*dss-dxs*dxs)*inv, i12 = (dxy*dxs-dxx*dys)*inv, i22 = (dxx*dyy-dxy*dxy)*inv;
+    dx = -(i00*gx + i01*gy + i02*gs);
+    dy = -(i01*gx + i11*gy + i12*gs);
+    ds = -(i02*gx + i12*gy + i22*gs);
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(ds) < 0.5) break;
+    if (Math.abs(dx) > 1e6 || Math.abs(dy) > 1e6 || Math.abs(ds) > 1e6) return null;
+    c += Math.round(dx); r += Math.round(dy); layer += Math.round(ds);
+    if (layer < 1 || layer > SIFT_LAYERS || c < SIFT_BORDER || c >= w-SIFT_BORDER || r < SIFT_BORDER || r >= h-SIFT_BORDER) return null;
+  }
+  if (i >= 5) return null;
+  const cur = dog[layer], prv = dog[layer-1], nxt = dog[layer+1], p = r*w+c, v = cur[p];
+  const gx = 0.5*(cur[p+1]-cur[p-1]), gy = 0.5*(cur[p+w]-cur[p-w]), gs = 0.5*(nxt[p]-prv[p]);
+  const contr = v + 0.5*(gx*dx + gy*dy + gs*ds);
+  if (Math.abs(contr) < postThr) return null;
+  const dxx = cur[p+1]+cur[p-1]-2*v, dyy = cur[p+w]+cur[p-w]-2*v;
+  const dxy = 0.25*(cur[p+w+1]-cur[p+w-1]-cur[p-w+1]+cur[p-w-1]);
+  const tr = dxx+dyy, det = dxx*dyy-dxy*dxy;
+  if (det <= 0 || tr*tr*SIFT_EDGE >= det*(SIFT_EDGE+1)*(SIFT_EDGE+1)) return null;
+  return { x: c+dx, y: r+dy, layer, ds, contrast: Math.abs(contr) };
+}
+// Dominant gradient orientations (36-bin histogram; extra keypoints for peaks >= 80% of max).
+// Angles are in the image's own y-down frame, the same frame the descriptor below uses.
+function siftOrientations(img, w, h, ox, oy, scl){
+  const radius = Math.max(1, Math.round(4.5*scl)), expf = -1/(2*(1.5*scl)*(1.5*scl));
+  const cx = Math.round(ox), cy = Math.round(oy), hist = new Float32Array(36);
+  for (let dy=-radius; dy<=radius; dy++){
+    const y = cy+dy; if (y < 1 || y >= h-1) continue;
+    for (let dx=-radius; dx<=radius; dx++){
+      const x = cx+dx; if (x < 1 || x >= w-1) continue;
+      if (dx*dx+dy*dy > radius*radius) continue;
+      const gx = img[y*w+x+1]-img[y*w+x-1], gy = img[(y+1)*w+x]-img[(y-1)*w+x];
+      let a = Math.atan2(gy, gx)*180/Math.PI; if (a < 0) a += 360;
+      hist[Math.min(35, Math.floor(a/10))] += Math.exp((dx*dx+dy*dy)*expf)*Math.sqrt(gx*gx+gy*gy);
+    }
+  }
+  for (let pass=0; pass<2; pass++){
+    const s = Float32Array.from(hist);
+    for (let i=0;i<36;i++) hist[i] = s[(i+35)%36] + s[i] + s[(i+1)%36];
+  }
+  let maxv = 0; for (let i=0;i<36;i++) if (hist[i] > maxv) maxv = hist[i];
+  if (!(maxv > 0)) return [0];
+  const out = [];
+  for (let i=0;i<36;i++){
+    const l = hist[(i+35)%36], c = hist[i], r = hist[(i+1)%36];
+    if (c > l && c >= r && c >= 0.8*maxv){
+      const den = l - 2*c + r, off = Math.abs(den) > 1e-9 ? 0.5*(l-r)/den : 0;
+      let ang = (i + 0.5 + off)*10; if (ang >= 360) ang -= 360; if (ang < 0) ang += 360;
+      out.push(ang*Math.PI/180);
+    }
+  }
+  return out.length ? out : [0];
+}
+// 128-D descriptor, OpenCV calcSIFTDescriptor geometry: 4x4 cells each 3σ wide, 8 orientation
+// bins, trilinear interpolation, Gaussian window, normalise / clip at 0.2 / renormalise.
+function siftDescriptor(img, w, h, ox, oy, scl, ang, out, off){
+  const d = 4, n = 8, hw = 3*scl;
+  const radius = Math.min(Math.round(hw*Math.SQRT2*(d+1)*0.5), Math.round(Math.hypot(w, h)));
+  const cosT = Math.cos(ang)/hw, sinT = Math.sin(ang)/hw, TWO_PI = 2*Math.PI;
+  const hist = new Float32Array((d+2)*(d+2)*n);
+  const px = Math.round(ox), py = Math.round(oy);
+  for (let i=-radius; i<=radius; i++){
+    const y = py+i; if (y <= 0 || y >= h-1) continue;
+    for (let j=-radius; j<=radius; j++){
+      const x = px+j; if (x <= 0 || x >= w-1) continue;
+      const cRot = j*cosT + i*sinT, rRot = -j*sinT + i*cosT;   // offset rotated into the keypoint's frame
+      const rbin = rRot + d/2 - 0.5, cbin = cRot + d/2 - 0.5;
+      if (rbin <= -1 || rbin >= d || cbin <= -1 || cbin >= d) continue;
+      const gx = img[y*w+x+1]-img[y*w+x-1], gy = img[(y+1)*w+x]-img[(y-1)*w+x];
+      let ori = Math.atan2(gy, gx) - ang; ori %= TWO_PI; if (ori < 0) ori += TWO_PI;
+      const obin = ori*n/TWO_PI;
+      const mag = Math.sqrt(gx*gx+gy*gy)*Math.exp(-(cRot*cRot+rRot*rRot)/(d*d*0.5));
+      const r0 = Math.floor(rbin), c0 = Math.floor(cbin), o0 = Math.floor(obin);
+      const fr = rbin-r0, fc = cbin-c0, fo = obin-o0;
+      for (let a=0;a<2;a++){
+        const wr = a ? fr : 1-fr, rr = r0+a+1;
+        for (let b=0;b<2;b++){
+          const wc = b ? fc : 1-fc, base = (rr*(d+2) + (c0+b+1))*n;
+          hist[base + ((o0  )%n+n)%n] += mag*wr*wc*(1-fo);
+          hist[base + ((o0+1)%n+n)%n] += mag*wr*wc*fo;
+        }
+      }
+    }
+  }
+  let k = 0, norm = 0;
+  for (let r=0;r<d;r++) for (let c=0;c<d;c++){
+    const base = ((r+1)*(d+2) + (c+1))*n;
+    for (let o=0;o<n;o++){ const v = hist[base+o]; out[off+k++] = v; norm += v*v; }
+  }
+  norm = Math.sqrt(norm);
+  if (!(norm > 1e-12)) return false;
+  let norm2 = 0;
+  for (let i=0;i<128;i++){ let v = out[off+i]/norm; if (v > 0.2) v = 0.2; out[off+i] = v; norm2 += v*v; }
+  norm2 = Math.sqrt(norm2);
+  for (let i=0;i<128;i++) out[off+i] /= norm2;
+  return true;
+}
+// Contrast threshold is 0.01 rather than OpenCV's 0.04 because OpenCV upsamples the image 2x
+// first, which surfaces far more fine-scale extrema; without that step, on real photos almost
+// every extremum sat just under the 0.04 bar (measured: 2,106 of 2,674 rejected, the best
+// rejected one at 3.39 vs a threshold of 3.40), leaving ~45 features per photo.
+// Returns { n, x, y, desc } in the input image's pixel coordinates.
+function siftFeatures(gray, w, h, maxFeatures = SIFT_MAX_FEATURES){
+  const nOL = SIFT_LAYERS, nG = nOL+3, kStep = Math.pow(2, 1/nOL);
+  const sig = [SIFT_SIGMA];
+  for (let i=1;i<nG;i++){ const prev = Math.pow(kStep, i-1)*SIFT_SIGMA, tot = prev*kStep; sig.push(Math.sqrt(tot*tot - prev*prev)); }
+  const preThr = Math.floor(0.5*SIFT_CONTRAST/nOL*255);
+  const feats = [];
+  let base = siftBlur(gray, w, h, Math.sqrt(SIFT_SIGMA*SIFT_SIGMA - 0.25)), ow = w, oh = h;
+  for (let o=0; ow >= 2*SIFT_BORDER+4 && oh >= 2*SIFT_BORDER+4; o++){
+    const g = [base];
+    for (let i=1;i<nG;i++) g.push(siftBlur(g[i-1], ow, oh, sig[i]));
+    const dog = [];
+    for (let i=0;i<nG-1;i++){ const a = g[i+1], b = g[i], dd = new Float32Array(ow*oh); for (let j=0;j<dd.length;j++) dd[j] = a[j]-b[j]; dog.push(dd); }
+    const octScale = Math.pow(2, o);
+    for (let L=1; L<=nOL; L++){
+      const cur = dog[L], prv = dog[L-1], nxt = dog[L+1];
+      for (let r=SIFT_BORDER; r<oh-SIFT_BORDER; r++){
+        for (let c=SIFT_BORDER; c<ow-SIFT_BORDER; c++){
+          const p = r*ow+c, v = cur[p];
+          if (Math.abs(v) <= preThr) continue;
+          let ok = true;
+          if (v > 0){
+            for (let dr=-1; dr<=1 && ok; dr++) for (let dc=-1; dc<=1; dc++){
+              const q = p+dr*ow+dc;
+              if (prv[q] >= v || nxt[q] >= v || (q !== p && cur[q] >= v)){ ok = false; break; }
+            }
+          } else {
+            for (let dr=-1; dr<=1 && ok; dr++) for (let dc=-1; dc<=1; dc++){
+              const q = p+dr*ow+dc;
+              if (prv[q] <= v || nxt[q] <= v || (q !== p && cur[q] <= v)){ ok = false; break; }
+            }
+          }
+          if (!ok) continue;
+          const ref = siftRefine(dog, L, r, c, ow, oh);
+          if (!ref) continue;
+          const scl = SIFT_SIGMA*Math.pow(kStep, ref.layer + ref.ds);   // sigma in this octave's pixels
+          const img = g[ref.layer];
+          for (const ang of siftOrientations(img, ow, oh, ref.x, ref.y, scl)){
+            const desc = new Float32Array(128);
+            if (!siftDescriptor(img, ow, oh, ref.x, ref.y, scl, ang, desc, 0)) continue;
+            feats.push({ x: ref.x*octScale, y: ref.y*octScale, response: ref.contrast, desc });
+          }
+        }
+      }
+    }
+    // next octave: every other pixel of the level at twice the base sigma
+    const src = g[nOL], nw = ow >> 1, nh = oh >> 1, nb = new Float32Array(nw*nh);
+    for (let y=0;y<nh;y++) for (let x=0;x<nw;x++) nb[y*nw+x] = src[(2*y)*ow + 2*x];
+    base = nb; ow = nw; oh = nh;
+  }
+  feats.sort((a, b) => b.response - a.response);
+  const kept = feats.slice(0, maxFeatures), n = kept.length;
+  const x = new Float32Array(n), y = new Float32Array(n), desc = new Float32Array(n*128);
+  for (let i=0;i<n;i++){ x[i] = kept[i].x; y[i] = kept[i].y; desc.set(kept[i].desc, i*128); }
+  return { n, x, y, desc };
+}
+// Nearest neighbour by L2 with Lowe's ratio test (on squared distances, hence ratio^2).
+function siftMatchFeatures(A, B){
+  const pts = [], r2 = SIFT_RATIO*SIFT_RATIO, da = A.desc, db = B.desc;
+  for (let i=0;i<A.n;i++){
+    const ai = i*128;
+    let best = Infinity, second = Infinity, bj = -1;
+    for (let j=0;j<B.n;j++){
+      const bjo = j*128;
+      let s = 0;
+      for (let t=0;t<128;t++){ const df = da[ai+t]-db[bjo+t]; s += df*df; if (s >= second) break; }
+      if (s < best){ second = best; best = s; bj = j; }
+      else if (s < second){ second = s; }
+    }
+    if (bj >= 0 && best < r2*second) pts.push({ x0: A.x[i], y0: A.y[i], x1: B.x[bj], y1: B.y[bj], score: 1/(1+Math.sqrt(best)) });
+  }
+  return pts;
+}
+
+// Each photo takes part in n-1 pairs, so its features are computed once per match canvas and
+// reused; match canvases are never rebuilt after a photo is added, so the cache can't go stale.
+const _siftCache = new WeakMap();
+function siftFeaturesFor(canvas){
+  let f = _siftCache.get(canvas);
+  if (!f){
+    const im = canvas.getContext('2d', {willReadFrequently:true}).getImageData(0, 0, canvas.width, canvas.height);
+    f = siftFeatures(toGrayFloat(im), canvas.width, canvas.height);
+    _siftCache.set(canvas, f);
+  }
+  return f;
+}
+async function matchPairSIFT(canvasA, canvasB){
+  const A = siftFeaturesFor(canvasA), B = siftFeaturesFor(canvasB);
+  log('info', `  SIFT: ${A.n} features in A, ${B.n} features in B`);
+  return siftMatchFeatures(A, B);
+}
+
+// Wrapper to match ALIKED's output format with user-selectable mode
+async function matchPairWithFallback(canvasA, canvasB){
+  const t0=performance.now();
+  const mode = $('#matcher-mode')?.value || 'auto';
+
+  if (mode === 'sift'){
+    const pts = await matchPairSIFT(canvasA, canvasB);
+    log('info',`SIFT: ${pts.length} matches in ${(performance.now()-t0).toFixed(0)}ms`);
+    return {matches:pts, method:'sift'};
+  }
+
+  if (mode === 'aliked'){
+    // Force ALIKED only - no fallback
+    try{
+      log('info','trying ALIKED+LightGlue...');
+      const pts = await matchPair(canvasA, canvasB);
+      log('info',`ALIKED: ${pts.length} matches in ${(performance.now()-t0).toFixed(0)}ms`);
+      return {matches:pts, method:'aliked'};
+    }catch(e){
+      log('err',`ALIKED failed: ${errMsg(e)}, no fallback in ALIKED-only mode`);
+      return {matches:[], method:'aliked'};
+    }
+  }
+
+  // AUTO mode: try ALIKED first, fall back to SIFT if it fails or finds too few matches
+  try{
+    if(S.session && S.ort){
+      log('info','trying ALIKED+LightGlue...');
+      const pts = await matchPair(canvasA, canvasB);
+      const elapsed=(performance.now()-t0).toFixed(0);
+      log('info',`ALIKED: ${pts.length} matches in ${elapsed}ms`);
+      if(pts.length>=12){ return {matches:pts, method:'aliked'}; }
+      log('warn', `ALIKED found only ${pts.length} matches, trying SIFT fallback…`);
+    }
+  }catch(e){
+    log('warn',`ALIKED failed: ${errMsg(e)}, falling back to SIFT`);
+  }
+
+  const pts = await matchPairSIFT(canvasA, canvasB);
+  log('info',`SIFT: ${pts.length} matches in ${(performance.now()-t0).toFixed(0)}ms`);
+  return {matches:pts, method:'sift'};
+}
+
+/* ══════════════════════ 3x3 MATRIX HELPERS ═════════════════ */
+const I3 = [1,0,0, 0,1,0, 0,0,1];
+function toMat3(H8){ return [H8[0],H8[1],H8[2], H8[3],H8[4],H8[5], H8[6],H8[7],1]; }
+function matMul3(A,B){
+  const r = new Array(9);
+  for (let i=0;i<3;i++) for (let j=0;j<3;j++){ let s=0; for (let k=0;k<3;k++) s += A[i*3+k]*B[k*3+j]; r[i*3+j]=s; }
+  return r;
+}
+function matInv3(m){
+  const [a,b,c,d,e,f,g,h,i] = m;
+  const A=e*i-f*h, B=-(d*i-f*g), C=d*h-e*g, D=-(b*i-c*h), E=a*i-c*g, F=-(a*h-b*g), G=b*f-c*e, H=-(a*f-c*d), I=a*e-b*d;
+  const det = a*A + b*B + c*C;
+  if (Math.abs(det) < 1e-12) return null;
+  const inv = 1/det;
+  return [A*inv,D*inv,G*inv, B*inv,E*inv,H*inv, C*inv,F*inv,I*inv];
+}
+function transpose3(m){ return [m[0],m[3],m[6], m[1],m[4],m[7], m[2],m[5],m[8]]; }
+function applyH(m, x, y){ const X=m[0]*x+m[1]*y+m[2], Y=m[3]*x+m[4]*y+m[5], W=m[6]*x+m[7]*y+m[8]; return [X/W, Y/W]; }
+function centering(w,h){ return [1,0,-w/2, 0,1,-h/2, 0,0,1]; }
+
+/* ── focal length extraction from a centered pairwise homography (Szeliski/OpenCV method) ── */
+function focalsFromHomography(h){
+  const out = [];
+  let d1 = h[6]*h[7], d2 = (h[7]-h[6])*(h[7]+h[6]);
+  let v1 = -(h[0]*h[1]+h[3]*h[4])/d1, v2 = (h[0]*h[0]+h[3]*h[3]-h[1]*h[1]-h[4]*h[4])/d2;
+  if (v1 < v2){ const t=v1; v1=v2; v2=t; }
+  let f1 = null;
+  if (v1>0 && v2>0) f1 = Math.sqrt(Math.abs(d1)>Math.abs(d2) ? v1 : v2);
+  else if (v1>0) f1 = Math.sqrt(v1); else if (v2>0) f1 = Math.sqrt(v2);
+
+  d1 = h[0]*h[3]+h[1]*h[4]; d2 = h[0]*h[0]+h[1]*h[1]-h[3]*h[3]-h[4]*h[4];
+  v1 = -h[2]*h[5]/d1; v2 = (h[5]*h[5]-h[2]*h[2])/d2;
+  if (v1 < v2){ const t=v1; v1=v2; v2=t; }
+  let f0 = null;
+  if (v1>0 && v2>0) f0 = Math.sqrt(Math.abs(d1)>Math.abs(d2) ? v1 : v2);
+  else if (v1>0) f0 = Math.sqrt(v1); else if (v2>0) f0 = Math.sqrt(v2);
+
+  if (f1!=null && isFinite(f1) && f1>0) out.push(f1);
+  if (f0!=null && isFinite(f0) && f0>0) out.push(f0);
+  return out;
+}
+function orthonormalize(Rraw){
+  let c0 = [Rraw[0],Rraw[3],Rraw[6]], c1 = [Rraw[1],Rraw[4],Rraw[7]];
+  const norm = v => Math.hypot(v[0],v[1],v[2]);
+  const n0 = norm(c0); if (!(n0>1e-9)) return null;
+  c0 = c0.map(v=>v/n0);
+  const dot01 = c0[0]*c1[0]+c0[1]*c1[1]+c0[2]*c1[2];
+  c1 = [c1[0]-dot01*c0[0], c1[1]-dot01*c0[1], c1[2]-dot01*c0[2]];
+  const n1 = norm(c1); if (!(n1>1e-9)) return null;
+  c1 = c1.map(v=>v/n1);
+  const c2 = [ c0[1]*c1[2]-c0[2]*c1[1], c0[2]*c1[0]-c0[0]*c1[2], c0[0]*c1[1]-c0[1]*c1[0] ];
+  return [ c0[0],c1[0],c2[0], c0[1],c1[1],c2[1], c0[2],c1[2],c2[2] ];
+}
+
+/* ══════════════════════ GRAPH: union-find + max spanning tree ═══ */
+class DSU{
+  constructor(n){ this.p = Array.from({length:n},(_,i)=>i); this.r = new Array(n).fill(0); }
+  find(x){ while (this.p[x]!==x){ this.p[x]=this.p[this.p[x]]; x=this.p[x]; } return x; }
+  union(a,b){ a=this.find(a); b=this.find(b); if (a===b) return false; if (this.r[a]<this.r[b])[a,b]=[b,a]; this.p[b]=a; if (this.r[a]===this.r[b]) this.r[a]++; return true; }
+}
+function connectedComponents(n, edges){
+  const dsu = new DSU(n);
+  for (const e of edges) dsu.union(e.i, e.j);
+  const groups = new Map();
+  for (let i=0;i<n;i++){ const r = dsu.find(i); if (!groups.has(r)) groups.set(r,[]); groups.get(r).push(i); }
+  return [...groups.values()];
+}
+function maxSpanningTree(nodes, edges){
+  const idOf = new Map(nodes.map((n,i)=>[n,i]));
+  const dsu = new DSU(nodes.length);
+  const sorted = [...edges].sort((a,b)=>b.inliers-a.inliers);
+  const tree = [];
+  for (const e of sorted){
+    const a = idOf.get(e.i), b = idOf.get(e.j);
+    if (a===undefined || b===undefined) continue;
+    if (dsu.union(a,b)) tree.push(e);
+  }
+  return tree;
+}
+
+/* ── bundle adjustment: re-optimise ALL placements jointly ───────────────
+   The spanning tree only *chains* pairwise homographies, so each edge's
+   ~1-2px of fit error accumulates down the chain and the redundant non-tree
+   edges — which carry the information that could correct that drift — are
+   never used. Solve every node's transform at once by minimising the total
+   match reprojection error over ALL edges (Levenberg-Marquardt with a
+   numeric Jacobian). The anchor stays fixed at identity to remove the
+   projective gauge freedom. On success, overwrites cumulative in place. */
+function bundleAdjust(cumulative, edges, ref){
+  const nodes = [...cumulative.keys()].filter(k => k !== ref);
+  if (!nodes.length) return;
+  const usable = edges.filter(e => e.pts && e.pts.length && cumulative.has(e.i) && cumulative.has(e.j));
+  if (!usable.length) return;
+  const idxOf = new Map(nodes.map((n,i)=>[n,i]));
+  const P = nodes.length*8;
+  let totalRes = 0; for (const e of usable) totalRes += e.pts.length*2;
+  // chained matrices can have h8 != 1; pack normalised (divide by h8) so that
+  // toMat3() reconstruction is exact.
+  const packH = H => { const s = Math.abs(H[8]) > 1e-9 ? H[8] : 1; return [H[0]/s,H[1]/s,H[2]/s,H[3]/s,H[4]/s,H[5]/s,H[6]/s,H[7]/s]; };
+  const getH = (p, node) => node===ref ? I3 : toMat3(Array.from(p.slice(idxOf.get(node)*8, idxOf.get(node)*8+8)));
+  // forward-transfer residual of one edge: predicted x1 = H_j^-1 * H_i * x0, measured against actual x1
+  const residuals = (p, e) => {
+    const Hi = getH(p, e.i), Hj = getH(p, e.j);
+    const HjI = matInv3(Hj); if (!HjI) return null;
+    const rel = matMul3(HjI, Hi); // maps i-pixels -> j-pixels
+    const out = new Float64Array(e.pts.length*2);
+    for (let t=0;t<e.pts.length;t++){
+      const q = e.pts[t];
+      // NB: rel is a product of inverted homographies, so rel[8] is generally != 1 —
+      // the denominator must use it, not a hard-coded 1.
+      const d = rel[6]*q.x0 + rel[7]*q.y0 + rel[8];
+      if (!(Math.abs(d) > 1e-12)) return null;
+      out[2*t]   = (rel[0]*q.x0 + rel[1]*q.y0 + rel[2])/d - q.x1;
+      out[2*t+1] = (rel[3]*q.x0 + rel[4]*q.y0 + rel[5])/d - q.y1;
+    }
+    return out;
+  };
+  const totalCost = p => {
+    let s = 0;
+    for (const e of usable){
+      const r = residuals(p, e); if (!r) return Infinity;
+      for (const v of r) s += v*v;
+    }
+    return s;
+  };
+  let p = new Float64Array(P);
+  nodes.forEach((n,i)=>{ const pn = packH(cumulative.get(n)); for (let c=0;c<8;c++) p[i*8+c] = pn[c]; });
+  let cur = totalCost(p);
+  if (!(cur < Infinity) || cur === 0) return;
+  const before = cur;
+  let lam = 1e-3;
+  for (let it=0; it<15; it++){
+    // accumulate JtJ / Jtr edge-by-edge; only the 16 params of the two nodes an
+    // edge touches have non-zero columns, so the per-edge work stays small.
+    const JtJ = Array.from({length:P}, ()=>new Float64Array(P));
+    const Jtr = new Float64Array(P);
+    for (const e of usable){
+      const base = residuals(p, e); if (!base) return;
+      const ks = [];
+      for (const node of [e.i, e.j]) if (node !== ref){ const i0 = idxOf.get(node)*8; for (let c=0;c<8;c++) ks.push(i0+c); }
+      if (!ks.length) continue;
+      const cols = new Map();
+      for (const k of ks){
+        const eps = 1e-6*Math.max(1, Math.abs(p[k]));
+        const saved = p[k]; p[k] = saved + eps;
+        const rp = residuals(p, e);
+        p[k] = saved;
+        if (!rp) return;
+        const col = new Float64Array(base.length);
+        for (let t=0;t<base.length;t++) col[t] = (rp[t]-base[t])/eps;
+        cols.set(k, col);
+      }
+      for (const k of ks){
+        const ck = cols.get(k);
+        for (let t=0;t<base.length;t++) Jtr[k] += ck[t]*base[t];
+        for (const k2 of ks){
+          const c2 = cols.get(k2);
+          let s = 0;
+          for (let t=0;t<base.length;t++) s += ck[t]*c2[t];
+          JtJ[k][k2] += s;
+        }
+      }
+    }
+    const A = JtJ.map((row,i)=>{ const r2 = Array.from(row); r2[i] = row[i]*(1+lam) + 1e-9; return r2; });
+    let d;
+    try{ d = solveLinearSystem(A, Array.from(Jtr, v=>-v)); }catch{ lam *= 10; if (lam > 1e10) break; continue; }
+    const p2 = Float64Array.from(p);
+    for (let k=0;k<P;k++) p2[k] += d[k];
+    const c2 = totalCost(p2);
+    if (c2 < cur){
+      const rel = (cur-c2)/Math.max(cur, 1e-12);
+      p = p2; cur = c2; lam = Math.max(lam*0.4, 1e-10);
+      if (rel < 1e-9) break;
+    } else {
+      lam *= 6;
+      if (lam > 1e10) break;
+    }
+  }
+  if (cur < before){
+    nodes.forEach((n,i)=>{ cumulative.set(n, toMat3(Array.from(p.slice(i*8,i*8+8)))); });
+    log('ok', `bundle adjustment: match residual ${Math.sqrt(before/totalRes).toFixed(2)}px -> ${Math.sqrt(cur/totalRes).toFixed(2)}px RMS`);
+  }
+}
+
+/* ── camera-model refinement for curved projections ──────────────
+   The per-node rotations are seeded by decomposing each node's projective
+   transform as K·R·K⁻¹ with a *guessed* shared focal. That decomposition
+   discards the projective DOF the pairwise fits absorbed, and any error in
+   the focal guess warps each photo differently — either one shows up as hard
+   content steps at photo boundaries in cylindrical/equirectangular output.
+   Re-solve the rotations AND the focal jointly against the match points in
+   exactly the pinhole model the renderer uses, so render geometry == fitted
+   geometry. Returns the refined focal length. */
+function rodrigues(v){
+  const th = Math.hypot(v[0],v[1],v[2]);
+  if (th < 1e-12) return I3;
+  const kx=v[0]/th, ky=v[1]/th, kz=v[2]/th, c=Math.cos(th), s=Math.sin(th), t=1-c;
+  return [ kx*kx*t+c,    kx*ky*t-kz*s,  kx*kz*t+ky*s,
+           ky*kx*t+kz*s, ky*ky*t+c,     ky*kz*t-kx*s,
+           kz*kx*t-ky*s, kz*ky*t+kx*s,  kz*kz*t+c ];
+}
+function optimizeCameraModel(rotations, edges, shots, ref, f){
+  const nodes = [...rotations.keys()].filter(k => k !== ref);
+  if (!nodes.length || !(f > 0)) return f;
+  const usable = edges.filter(e => e.pts && e.pts.length && rotations.has(e.i) && rotations.has(e.j));
+  if (!usable.length) return f;
+  const idxOf = new Map(nodes.map((n,i)=>[n,i]));
+  const seedR = new Map(rotations);
+  const P = nodes.length*3 + 1; // per-node axis-angle delta + log-focal
+  let totalRes = 0; for (const e of usable) totalRes += e.pts.length*2;
+  const rotAt = (p, node) => {
+    if (node === ref) return I3;
+    const i = idxOf.get(node);
+    return matMul3(rodrigues([p[i*3], p[i*3+1], p[i*3+2]]), seedR.get(node));
+  };
+  // residual: project match x0 through pinhole(i) -> world -> pinhole(j), compare to x1
+  const residuals = p => {
+    const f = Math.exp(p[P-1]);
+    if (!(f > 1)) return null;
+    const Rc = new Map([[ref, I3]]);
+    for (const n of nodes){ const R = rotAt(p, n); if (!R) return null; Rc.set(n, R); }
+    const out = [];
+    for (const e of usable){
+      const Ri = Rc.get(e.i), Rjt = transpose3(Rc.get(e.j));
+      const cxi = shots[e.i].w/2, cyi = shots[e.i].h/2, cxj = shots[e.j].w/2, cyj = shots[e.j].h/2;
+      for (const q of e.pts){
+        const r0x=(q.x0-cxi)/f, r0y=(q.y0-cyi)/f;
+        const wx = Ri[0]*r0x+Ri[1]*r0y+Ri[2], wy = Ri[3]*r0x+Ri[4]*r0y+Ri[5], wz = Ri[6]*r0x+Ri[7]*r0y+Ri[8];
+        const jx = Rjt[0]*wx+Rjt[1]*wy+Rjt[2]*wz, jy = Rjt[3]*wx+Rjt[4]*wy+Rjt[5]*wz, jz = Rjt[6]*wx+Rjt[7]*wy+Rjt[8]*wz;
+        if (!(jz > 1e-6)) return null;
+        out.push(f*jx/jz + cxj - q.x1, f*jy/jz + cyj - q.y1);
+      }
+    }
+    return Float64Array.from(out);
+  };
+  const totalCost = p => { const r = residuals(p); if (!r) return Infinity; let s=0; for (const v of r) s+=v*v; return s; };
+  // LM from a given log-focal start; returns {p, cost} or null
+  const run = logF0 => {
+    let p = new Float64Array(P);
+    p[P-1] = logF0;
+    let cur = totalCost(p);
+    if (!(cur < Infinity) || cur === 0) return null;
+    let lam = 1e-3;
+    for (let it=0; it<20; it++){
+      const base = residuals(p); if (!base) return null;
+      const J = [];
+      let ok = true;
+      for (let k=0;k<P;k++){
+        const eps = 1e-6*Math.max(1, Math.abs(p[k]));
+        const saved = p[k]; p[k] = saved + eps;
+        const rp = residuals(p); p[k] = saved;
+        if (!rp){ ok = false; break; }
+        const col = new Float64Array(base.length);
+        for (let t=0;t<base.length;t++) col[t] = (rp[t]-base[t])/eps;
+        J.push(col);
+      }
+      if (!ok) return null;
+      const JtJ = Array.from({length:P},()=>new Float64Array(P));
+      const Jtr = new Float64Array(P);
+      for (let k=0;k<P;k++){
+        const ck = J[k];
+        for (let t=0;t<base.length;t++) Jtr[k] += ck[t]*base[t];
+        for (let k2=k;k2<P;k2++){
+          const c2 = J[k2];
+          let s = 0;
+          for (let t=0;t<base.length;t++) s += ck[t]*c2[t];
+          JtJ[k][k2] = s; JtJ[k2][k] = s;
+        }
+      }
+      // Marquardt damping scales the diagonal by (1+lam); scaling it by lam alone wipes it out
+      // at small lam, so most steps were rejected until lam crawled back up to ~1.
+      const A = JtJ.map((row,i)=>{ const r2 = Array.from(row); r2[i] = row[i]*(1+lam) + 1e-9; return r2; });
+      let d;
+      try{ d = solveLinearSystem(A, Array.from(Jtr, v=>-v)); }catch{ lam *= 10; if (lam > 1e10) break; continue; }
+      const p2 = Float64Array.from(p);
+      for (let k=0;k<P;k++) p2[k] += d[k];
+      const c2 = totalCost(p2);
+      if (c2 < cur){
+        const rel = (cur-c2)/Math.max(cur, 1e-12);
+        p = p2; cur = c2; lam = Math.max(lam*0.4, 1e-10);
+        if (rel < 1e-9) break;
+      } else {
+        lam *= 6;
+        if (lam > 1e10) break;
+      }
+    }
+    return { p, cost: cur };
+  };
+  // The closed-form focal seed can be far off (unstable for small-rotation pairs),
+  // and a bad focal also skews the seeded rotations — so try a few focal starts and
+  // keep the best converged result.
+  const seed0 = Math.log(f);
+  const seedP = new Float64Array(P); seedP[P-1] = seed0;
+  const startCost = totalCost(seedP); // the unrefined model, which a result has to beat to be kept
+  let best = null;
+  for (const off of [0, Math.LN2, -Math.LN2, 2*Math.LN2, -2*Math.LN2]){
+    const r = run(seed0 + off);
+    if (r && (!best || r.cost < best.cost)) best = r;
+  }
+  if (!best || !(best.cost < startCost)) return f;
+  {
+    const beforeCost = startCost;
+    const p = best.p, cur2 = best.cost;
+    const fNew = Math.exp(p[P-1]);
+    for (const n of nodes) rotations.set(n, matMul3(rodrigues([p[idxOf.get(n)*3], p[idxOf.get(n)*3+1], p[idxOf.get(n)*3+2]]), seedR.get(n)));
+    log('ok', `camera model refined: f ${Math.round(f)}px -> ${Math.round(fNew)}px, residual ${Math.sqrt(beforeCost/totalRes).toFixed(2)}px -> ${Math.sqrt(cur2/totalRes).toFixed(2)}px RMS`);
+    return fNew;
+  }
+}
+
+/* ══════════════════════ EXPOSURE GAIN (optional, graph-wide) ═══ */
+function computeGains(nodes, edges, refNode){
+  const idOf = new Map(nodes.map((n,i)=>[n,i]));
+  const n = nodes.length;
+  if (n <= 1) return new Map(nodes.map(id=>[id,1]));
+  const ATA = Array.from({length:n},()=>new Array(n).fill(0)), ATb = new Array(n).fill(0);
+  let any = false;
+  for (const e of edges){
+    if (e.ratio === null || !isFinite(e.ratio) || e.ratio<=0) continue;
+    const a = idOf.get(e.i), b = idOf.get(e.j);
+    const r = Math.log(e.ratio); // log(gain_j) - log(gain_i) ~= log(meanB/meanA) = r  (B brighter if r>0)
+    // minimize (logGain[b]-logGain[a]-r)^2
+    ATA[a][a]+=1; ATA[b][b]+=1; ATA[a][b]-=1; ATA[b][a]-=1;
+    ATb[a]-=r; ATb[b]+=r; any = true;
+  }
+  const refIdx = idOf.get(refNode);
+  ATA[refIdx][refIdx] += 1e6; // anchor reference gain to 0 (log) i.e. gain=1
+  if (!any) return new Map(nodes.map(id=>[id,1]));
+  let sol;
+  try{ sol = solveLinearSystem(ATA, ATb); }catch{ return new Map(nodes.map(id=>[id,1])); }
+  const gains = new Map();
+  nodes.forEach((id,i) => gains.set(id, Math.exp(Math.max(-1.5, Math.min(1.5, sol[i])))));
+  return gains;
+}
+function meanLumaAt(canvas, x, y, r){
+  const ctx = canvas.getContext('2d', {willReadFrequently:true});
+  const x0 = Math.max(0, Math.round(x-r)), y0 = Math.max(0, Math.round(y-r));
+  const x1 = Math.min(canvas.width, Math.round(x+r)), y1 = Math.min(canvas.height, Math.round(y+r));
+  if (x1<=x0 || y1<=y0) return null;
+  const d = ctx.getImageData(x0,y0,x1-x0,y1-y0).data;
+  let sum=0, cnt=0;
+  for (let i=0;i<d.length;i+=4){ sum += 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; cnt++; }
+  return cnt ? sum/cnt : null;
+}
+
+/* ══════════════════════ WEBGL: shaders + program helper ════ */
+function compileShader(gl, type, src){
+  const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){ const info = gl.getShaderInfoLog(sh); gl.deleteShader(sh); throw new Error('Shader compile error: '+info); }
+  return sh;
+}
+function createProgram(gl, vsSrc, fsSrc){
+  const vs = compileShader(gl, gl.VERTEX_SHADER, vsSrc), fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+  const p = gl.createProgram(); gl.attachShader(p,vs); gl.attachShader(p,fs); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)){ const info = gl.getProgramInfoLog(p); throw new Error('Program link error: '+info); }
+  return p;
+}
+const VS_FULLSCREEN = `#version 300 es
+in vec2 a_pos;
+out vec2 v_outPix;
+uniform vec2 u_outSize;
+void main(){
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  v_outPix = (a_pos*0.5+0.5) * u_outSize;
+}`;
+const FS_WARP = `#version 300 es
+precision highp float;
+in vec2 v_outPix;
+uniform int u_mode; // 0 rectilinear (direct homography), 1 cylindrical, 2 equirectangular
+uniform vec2 u_outCenter;
+uniform float u_outF;
+uniform mat3 u_Rt;
+uniform float u_f;
+uniform mat3 u_Hsrc; // mode 0 only: output-canvas pixel -> source pixel, direct homography
+uniform vec2 u_srcCenter;
+uniform vec2 u_srcSize;
+uniform float u_gain;
+uniform float u_feather;
+uniform sampler2D u_tex;
+out vec4 fragColor;
+
+vec3 outputRay(vec2 p){
+  vec2 d = p - u_outCenter;
+  if (u_mode==1){ float th=d.x/u_outF; float h=d.y/u_outF; return normalize(vec3(sin(th), h, cos(th))); }
+  else { float lon=d.x/u_outF; float lat=d.y/u_outF; return normalize(vec3(cos(lat)*sin(lon), sin(lat), cos(lat)*cos(lon))); }
+}
+void main(){
+  vec2 proj;
+  if (u_mode==0){
+    vec3 s = u_Hsrc * vec3(v_outPix, 1.0);
+    if (abs(s.z) < 1e-6) discard;
+    proj = s.xy / s.z;
+  } else {
+    vec3 ray = outputRay(v_outPix);
+    vec3 rc = u_Rt * ray;
+    if (rc.z <= 0.0005) { discard; }
+    proj = vec2(rc.x/rc.z, rc.y/rc.z) * u_f + u_srcCenter;
+  }
+  if (proj.x<0.0 || proj.y<0.0 || proj.x>=u_srcSize.x || proj.y>=u_srcSize.y) discard;
+  vec2 uv = proj / u_srcSize;
+  float fx = min(uv.x, 1.0-uv.x) / u_feather;
+  float fy = min(uv.y, 1.0-uv.y) / u_feather;
+  float w = clamp(min(fx,fy), 0.0, 1.0);
+  w = max(w, 0.02);
+  vec4 c = texture(u_tex, uv);
+  fragColor = vec4(c.rgb * u_gain * w, w);
+}`;
+const FS_NORMALIZE = `#version 300 es
+precision highp float;
+in vec2 v_outPix;
+uniform sampler2D u_accum;
+uniform vec2 u_outSize;
+out vec4 fragColor;
+void main(){
+  vec2 uv = v_outPix / u_outSize;
+  vec4 a = texture(u_accum, uv);
+  if (a.a < 0.0005) { fragColor = vec4(0.0); return; }
+  fragColor = vec4(clamp(a.rgb/a.a, 0.0, 1.0), 1.0);
+}`;
+
+function ensureGL(){
+  if (S.gl) return S.gl;
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl2');
+  if (!gl) throw new Error('WebGL2 is not supported in this browser');
+  gl.getExtension('EXT_color_buffer_float');
+  // REMOVED: gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  // This was causing textures to be flipped vertically during upload,
+  // which combined with the homography computation caused misalignment.
+  S.gl = gl; S.glCanvas = canvas;
+  S.progWarp = createProgram(gl, VS_FULLSCREEN, FS_WARP);
+  S.progNorm = createProgram(gl, VS_FULLSCREEN, FS_NORMALIZE);
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  S.quadBuf = quad;
+  return gl;
+}
+
+/* ══════════════════════ PROJECTION MATH (CPU mirror of shader) ══ */
+function forwardProject(mode, ray, outF){
+  const n = Math.hypot(ray[0],ray[1],ray[2]); const r = [ray[0]/n, ray[1]/n, ray[2]/n];
+  if (mode===0){ if (r[2]<=1e-4) return null; return [outF*r[0]/r[2], outF*r[1]/r[2]]; }
+  if (mode===1){ const d=Math.hypot(r[0],r[2]); if (d<1e-6) return null; const th=Math.atan2(r[0],r[2]); const h=r[1]/d; return [outF*th, outF*h]; }
+  const lat = Math.asin(Math.max(-1,Math.min(1,r[1]))); const lon = Math.atan2(r[0],r[2]); return [outF*lon, outF*lat];
+}
+const MODE_NUM = { rectilinear:0, cylindrical:1, equirectangular:2 };
+
+/* ══════════════════════ STITCH PIPELINE ═══════════════════ */
+$('#stitch').onclick = stitch;
+async function stitch(){
+  if (S.busy || S.shots.length < 2) return;
+  S.busy = true; $('#stitch').disabled = true;
+  const t0 = performance.now();
+  // Keep the screen (and, by extension, the tab) awake for the duration — a stitch can run
+  // for minutes, and mobile browsers are far more willing to reclaim a tab's memory once the
+  // screen locks or it's treated as idle. Purely best-effort: unsupported or denied is fine.
+  let wakeLock = null;
+  try{ if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch{}
+  try{
+    const key = $('#kpick').value;
+    // No point downloading/compiling the ~65MB ALIKED+LightGlue+ model at all if it's never
+    // going to be used this run.
+    if ($('#matcher-mode')?.value !== 'sift'){
+      setProgress(0, 'loading model…');
+      await ensureSession(key);
+    }
+    const shots = S.shots;
+    const n = shots.length;
+
+    const totalPairs = n*(n-1)/2;
+    // There used to be a cheap low-resolution "screening" pass before the real match, meant to
+    // reject non-overlapping pairs before paying for full-resolution matching. Measured in
+    // practice it wasn't cheap at all: LightGlue's attention cost is dominated by the model's
+    // fixed keypoint budget, not image resolution, so a 360px screening match and a 1280px real
+    // match cost almost exactly the same. That made screening pure overhead — it roughly doubled
+    // total time on every pair that does overlap, with no real saving on the ones that don't — so
+    // there's now only a single matching pass, straight at full resolution, for every pair.
+    log('info', `matching ${n} photos for overlaps (${totalPairs} candidate pairs) at full resolution…`);
+    const candidates = [];
+    for (let i=0;i<n;i++) for (let j=i+1;j<n;j++) candidates.push({ i, j });
+
+    const tMatchStart = performance.now();
+    const edges = [];
+    let candNum = 0;
+    for (const {i,j} of candidates){
+      try{
+        candNum++;
+        const label = `${shots[i].name} × ${shots[j].name}`;
+        setProgress(candNum/Math.max(1,candidates.length)*0.9, `matching ${candNum}/${candidates.length}: ${label}`);
+        log('info', `matching ${label}…`);
+
+        // Use fallback matcher with comprehensive logging
+        const result = await matchPairWithFallback(shots[i].matchCanvas, shots[j].matchCanvas);
+        const pts = result.matches;
+        log('info', `${label}: ${result.method} found ${pts.length} matches before RANSAC`);
+
+        // Try RANSAC with multiple thresholds and pick best result
+        let res = ransacHomography(pts, 2);
+        if (!res || res.inliers < 12) res = ransacHomography(pts, 3);
+        if (!res || res.inliers < 12) res = ransacHomography(pts, 4);
+
+        log('info', `${label}: best RANSAC ${res ? res.inliers+'/'+res.total+' inliers' : 'FAILED'}`);
+
+        // Debug tracking
+        S.debug.pairsProcessed++;
+        S.debug.totalMatches += pts.length;
+        if (res) {
+          const ratio0 = res.inliers / res.total;
+          S.debug.inlierRatios.push(ratio0);
+
+          logDebugEntry(
+            shots[i].name.replace('.jpg','').replace('.png',''),
+            shots[j].name.replace('.jpg','').replace('.png',''),
+            result.method,
+            pts.length,
+            res.inliers,
+            ratio0
+          );
+        }
+
+        // Apply match score filtering if we have enough matches
+        let filteredPts = pts;
+        if (pts.length > 50) {
+          const scores = pts.map(p => p.score || 1).sort((a,b)=>a-b);
+          const cutoff = scores[Math.floor(scores.length*0.2)]; // keep top 80% by score
+          filteredPts = pts.filter(p => (p.score||1) >= cutoff);
+          log('info', `${label}: after score filtering: ${filteredPts.length} matches`);
+        }
+
+        const resFiltered = ransacHomography(filteredPts, 3);
+        if (!res || !resFiltered || resFiltered.inliers < res.inliers) res = resFiltered;
+
+        if (!res || res.inliers < 12 || res.inliers/res.total < 0.25){ log('warn', `${label}: not enough reliable matches`); continue; }
+        let ratio = null;
+        try{
+          const samples = res.inlierPts.slice(0, 12);
+          const ratios = [];
+          for (const p of samples){
+            const la = meanLumaAt(shots[i].matchCanvas, p.x0, p.y0, 6);
+            const lb = meanLumaAt(shots[j].matchCanvas, p.x1, p.y1, 6);
+            if (la && lb && la>2 && lb>2) ratios.push(lb/la);
+          }
+          if (ratios.length){ ratios.sort((a,b)=>a-b); ratio = ratios[Math.floor(ratios.length/2)]; }
+        }catch{}
+        // res.H maps matchCanvas(i) -> matchCanvas(j) pixel coords; scale up to each photo's
+        // own output-resolution canvas (what everything downstream of here operates in).
+        const scaleI = shots[i].w / shots[i].matchCanvas.width, scaleJ = shots[j].w / shots[j].matchCanvas.width;
+        const Hfull = matMul3(matMul3([scaleJ,0,0, 0,scaleJ,0, 0,0,1], toMat3(res.H)), [1/scaleI,0,0, 0,1/scaleI,0, 0,0,1]);
+        // Keep a subsample of the inlier matches (scaled to full-res canvas coords) — the bundle
+        // adjuster re-optimises all placements against these, incl. the non-tree edges.
+        const step = Math.max(1, Math.ceil(res.inlierPts.length/400));
+        const ptsBA = [];
+        for (let k=0;k<res.inlierPts.length;k+=step){
+          const p = res.inlierPts[k];
+          ptsBA.push({ x0:p.x0*scaleI, y0:p.y0*scaleI, x1:p.x1*scaleJ, y1:p.y1*scaleJ });
+        }
+        edges.push({ i, j, H: Hfull, inliers: res.inliers, total: res.total, ratio, pts: ptsBA });
+        log('ok', `${label}: ${res.inliers}/${res.total} inliers`);
+      }catch(e){ log('warn', `${shots[i].name} × ${shots[j].name}: ${errMsg(e)}`); }
+    }
+    log('info', `matching took ${((performance.now()-tMatchStart)/1000).toFixed(1)}s`);
+
+    if (!edges.length){ log('err','no two photos could be matched to each other — nothing to stitch'); return; }
+
+    const groups = connectedComponents(n, edges);
+    const matched = new Set(); edges.forEach(e=>{matched.add(e.i);matched.add(e.j);});
+    const singletons = shots.map((s,i)=>i).filter(i=>!matched.has(i));
+    if (singletons.length) log('warn', `${singletons.length} photo(s) didn't overlap with any other and will be skipped: ${singletons.map(i=>shots[i].name).join(', ')}`);
+
+    const tBuildStart = performance.now();
+    S.results = [];
+    const buildGroups = groups.filter(g => g.length >= 2);
+    for (let gi=0; gi<buildGroups.length; gi++){
+      const group = buildGroups[gi];
+      setProgress(0.9 + gi/Math.max(1,buildGroups.length)*0.1, `building panorama ${gi+1}/${buildGroups.length} (${group.length} photos: warp + blend)…`);
+      try{ const res = await buildPanorama(group, edges, shots); if (res) S.results.push(res); }
+      catch(e){ log('err', `stitching a group of ${group.length} photos failed: ${errMsg(e)}`); }
+    }
+    log('info', `building panorama(s) took ${((performance.now()-tBuildStart)/1000).toFixed(1)}s`);
+
+    const dt = ((performance.now()-t0)/1000).toFixed(1);
+    if (!S.results.length){ log('err','no panorama could be built'); }
+    else{
+      log('ok', `done in ${dt}s — built ${S.results.length} panorama${S.results.length>1?'s':''}`);
+      $('#st-time').textContent = dt + 's';
+      renderResults();
+      const unmatchedNames = singletons.map(i=>shots[i].name);
+      const warnbox = $('#warnbox');
+      if (unmatchedNames.length){ warnbox.textContent = `Not stitched (no overlap found): ${unmatchedNames.join(', ')}`; warnbox.classList.remove('hidden'); }
+      else warnbox.classList.add('hidden');
+    }
+  }catch(e){
+    console.error(e); log('err', `pipeline failed: ${errMsg(e)}`);
+
+    // Update debug stats even on failure
+    updateDebugStats();
+  }finally{
+    try{ wakeLock?.release(); }catch{}
+    setProgress(null); $('#prog i').style.width='0%';
+    S.busy = false; updateReady();
+
+    // Final debug summary
+    if (S.debug.pairsProcessed > 0){
+      const avgRatio = S.debug.inlierRatios.length > 0
+        ? (S.debug.inlierRatios.reduce((a,b)=>a+b,0) / S.debug.inlierRatios.length * 100).toFixed(1)
+        : 'N/A';
+
+      log('info', `📊 DEBUG SUMMARY: ${S.debug.pairsProcessed} pairs matched, ${S.debug.totalMatches.toLocaleString()} total matches, avg inlier ratio: ${avgRatio}%`);
+      updateDebugStats();
+    }
+  }
+}
+
+async function buildPanorama(group, allEdges, shots){
+  const edges = allEdges.filter(e => group.includes(e.i) && group.includes(e.j));
+  const tree = maxSpanningTree(group, edges);
+  const adj = new Map(group.map(g=>[g,[]]));
+  for (const e of tree){ adj.get(e.i).push({to:e.j, H:e.H, fwd:true}); adj.get(e.j).push({to:e.i, H:e.H, fwd:false}); }
+
+  const degree = new Map(group.map(g=>[g,0]));
+  for (const e of edges){ degree.set(e.i, degree.get(e.i)+e.inliers); degree.set(e.j, degree.get(e.j)+e.inliers); }
+  let ref = group[0]; for (const g of group) if (degree.get(g) > degree.get(ref)) ref = g;
+
+  // BFS over the spanning tree, composing pairwise homographies into a single
+  // transform per node that maps that node's own pixels into the anchor's frame.
+  const cumulative = new Map(); cumulative.set(ref, I3);
+  const visited = new Set([ref]); const queue = [ref];
+  while (queue.length){
+    const cur = queue.shift();
+    for (const edge of adj.get(cur)){
+      if (visited.has(edge.to)) continue;
+      const i = edge.fwd ? cur : edge.to; // edge.H always maps i -> j (the original edge's own direction)
+      // cumulative(x) maps x's pixels -> anchor pixels, so extending the chain across cur->to
+      // requires the to->cur transform (the INVERSE of the cur->to mapping).
+      const mapToToCur = (cur === i) ? matInv3(edge.H) : edge.H;
+      if (!mapToToCur) continue;
+      visited.add(edge.to);
+      cumulative.set(edge.to, matMul3(cumulative.get(cur), mapToToCur));
+      queue.push(edge.to);
+    }
+  }
+
+  // The BFS chain above accumulates each edge's fit error down the tree; re-optimise
+  // every placement jointly against ALL edges (incl. non-tree ones) to spread and
+  // cancel that drift. Failure here must never abort the stitch — the chained
+  // placements are a usable fallback.
+  try{ bundleAdjust(cumulative, edges, ref); }
+  catch(e){ log('warn', `bundle adjustment skipped: ${errMsg(e)}`); }
+
+  const placed = group.filter(g => cumulative.has(g));
+  if (placed.length < 2) throw new Error('not enough photos could be geometrically placed');
+
+  // Exposure matching is optional and can be disabled via UI
+  let gains;
+  if (S.exposureMatch) {
+    gains = computeGains(placed, edges.filter(e=>placed.includes(e.i)&&placed.includes(e.j)), ref);
+    log('info', `computed exposure gains for ${placed.length} photos`);
+  } else {
+    gains = new Map(placed.map(n => [n, 1])); // No adjustment
+    log('info', 'exposure matching disabled — using uniform gain of 1.0');
+  }
+
+  // Direct planar bounds (no camera model needed): exact for any homography, used for
+  // rectilinear rendering and to judge whether the set is "narrow" enough for it at all.
+  const GRID = 8;
+  function directBounds(){
+    let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+    for (const node of placed){
+      const cum = cumulative.get(node), w = shots[node].w, h = shots[node].h;
+      for (let gx=0;gx<=GRID;gx++) for (let gy=0;gy<=GRID;gy++){
+        const [px,py] = applyH(cum, gx/GRID*w, gy/GRID*h);
+        minX=Math.min(minX,px); maxX=Math.max(maxX,px); minY=Math.min(minY,py); maxY=Math.max(maxY,py);
+      }
+    }
+    return {minX,maxX,minY,maxY};
+  }
+  const planarBB = directBounds();
+  const avgW = placed.reduce((s,n)=>s+shots[n].w,0)/placed.length;
+  const avgH = placed.reduce((s,n)=>s+shots[n].h,0)/placed.length;
+  const planarWide = (planarBB.maxX-planarBB.minX) > 2.6*avgW || (planarBB.maxY-planarBB.minY) > 2.6*avgH;
+
+  // Rotation + shared focal length (only meaningful, and only computed, for curved projections;
+  // a planar homography chain has no unique rotation decomposition, so rectilinear never uses this).
+  let rotations = null, f = null;
+  function ensureCameraModel(){
+    if (rotations) return;
+    const focals = [];
+    for (const e of edges){
+      const Hc = matMul3(matMul3(centering(shots[e.j].w, shots[e.j].h), e.H), matInv3(centering(shots[e.i].w, shots[e.i].h)));
+      for (const fc of focalsFromHomography(Hc)) if (isFinite(fc) && fc>10) focals.push(fc);
+    }
+    if (focals.length){ focals.sort((a,b)=>a-b); f = focals[Math.floor(focals.length/2)]; }
+    else { f = 0.85 * Math.max(shots[ref].w, shots[ref].h); log('warn', 'could not estimate focal length from matches — using a default lens assumption'); }
+    rotations = new Map(); rotations.set(ref, I3);
+    for (const node of group){
+      if (node === ref) continue;
+      const cum = cumulative.get(node);
+      if (!cum) continue;
+      const Tc_node = centering(shots[node].w, shots[node].h), Tc_ref = centering(shots[ref].w, shots[ref].h);
+      const Hc = matMul3(matMul3(Tc_ref, cum), matInv3(Tc_node));
+      const Rraw = [ Hc[0], Hc[1], Hc[2]/f, Hc[3], Hc[4], Hc[5]/f, Hc[6]*f, Hc[7]*f, Hc[8] ];
+      const R = orthonormalize(Rraw);
+      if (!R){ log('warn', `${shots[node].name}: degenerate rotation, skipped for curved projection`); continue; }
+      rotations.set(node, R);
+    }
+    // The seeded rotations/focal are only an initial guess (focal from a fragile
+    // closed-form, rotations from a lossy decomposition). Re-solve both against the
+    // actual match points in the pinhole model the renderer will use — without this,
+    // per-photo warp differences show up as hard content steps at the seams.
+    try{ f = optimizeCameraModel(rotations, edges, shots, ref, f); }
+    catch(e){ log('warn', `camera model refinement skipped: ${errMsg(e)}`); }
+  }
+
+  let mode;
+  if (S.projection === 'auto') mode = planarWide ? 'cylindrical' : 'rectilinear';
+  else mode = S.projection;
+  if (mode !== 'rectilinear'){
+    ensureCameraModel();
+    if (S.projection === 'auto'){
+      let maxPitch = 0;
+      for (const node of placed){ const R = rotations.get(node); if (!R) continue; const pitch = Math.asin(Math.max(-1,Math.min(1,R[5]))); maxPitch = Math.max(maxPitch, Math.abs(pitch)); }
+      if (maxPitch > 0.6) mode = 'equirectangular';
+    }
+  }
+  const modeNum = MODE_NUM[mode];
+  if (mode !== 'rectilinear'){
+    const notPlaced = placed.filter(n => !rotations.has(n));
+    if (notPlaced.length){ log('warn', `${notPlaced.map(n=>shots[n].name).join(', ')} could not be placed on a ${mode} projection (degenerate rotation) and will be left out`); }
+  }
+  const renderNodes = mode === 'rectilinear' ? placed : placed.filter(n => rotations.has(n));
+  if (renderNodes.length < 2) throw new Error('not enough photos could be placed on the chosen projection');
+
+  let minX,maxX,minY,maxY;
+  if (mode === 'rectilinear'){ ({minX,maxX,minY,maxY} = planarBB); }
+  else{
+    minX=Infinity;maxX=-Infinity;minY=Infinity;maxY=-Infinity;
+    const outF = f;
+    for (const node of renderNodes){
+      const R = rotations.get(node), w = shots[node].w, h = shots[node].h, cx=w/2, cy=h/2;
+      for (let gx=0;gx<=GRID;gx++) for (let gy=0;gy<=GRID;gy++){
+        const x = gx/GRID*w, y = gy/GRID*h;
+        const rayCam = [(x-cx)/f, (y-cy)/f, 1];
+        const rayWorld = [ R[0]*rayCam[0]+R[1]*rayCam[1]+R[2]*rayCam[2], R[3]*rayCam[0]+R[4]*rayCam[1]+R[5]*rayCam[2], R[6]*rayCam[0]+R[7]*rayCam[1]+R[8]*rayCam[2] ];
+        const proj = forwardProject(modeNum, rayWorld, outF);
+        if (!proj) continue;
+        minX = Math.min(minX, proj[0]); maxX = Math.max(maxX, proj[0]);
+        minY = Math.min(minY, proj[1]); maxY = Math.max(maxY, proj[1]);
+      }
+    }
+  }
+  if (!isFinite(minX) || !isFinite(maxX)) throw new Error('could not compute panorama bounds');
+  let W = Math.ceil(maxX-minX), H = Math.ceil(maxY-minY);
+
+  // Check for high-res mode
+  const useHighRes = $('#high-res')?.checked || false;
+  let outScale = 1;
+  if (!useHighRes) {
+    const maxDim = Math.min(maxTex(), 3072); // Default limit to 3072px for speed
+    if (W > maxDim || H > maxDim) outScale = maxDim / Math.max(W,H);
+  }
+  W = Math.max(8, Math.round(W*outScale)); H = Math.max(8, Math.round(H*outScale));
+  const outCenterX = -minX*outScale, outCenterY = -minY*outScale;
+  const outFscaled = mode==='rectilinear' ? 0 : f*outScale;
+  // maps a raw canvas pixel (as the vertex shader hands fragments, before any outCenter/outScale
+  // correction) back to the original, unscaled reference-image pixel space cumulative[] uses
+  const unmap = [1/outScale,0,-outCenterX/outScale, 0,1/outScale,-outCenterY/outScale, 0,0,1];
+
+  const gl = ensureGL();
+  const fbW = W, fbH = H;
+  const accumTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, accumTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, fbW, fbH, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, accumTex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('float framebuffer not supported on this GPU/browser');
+  gl.viewport(0,0,fbW,fbH);
+  gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.useProgram(S.progWarp);
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.quadBuf);
+  const posLoc = gl.getAttribLocation(S.progWarp, 'a_pos');
+  gl.enableVertexAttribArray(posLoc); gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+  const U = n => gl.getUniformLocation(S.progWarp, n);
+  gl.uniform2f(U('u_outSize'), fbW, fbH);
+  gl.uniform2f(U('u_outCenter'), outCenterX, outCenterY);
+  gl.uniform1f(U('u_outF'), outFscaled);
+  gl.uniform1i(U('u_mode'), modeNum);
+  gl.uniform1f(U('u_f'), f || 0);
+  gl.uniform1f(U('u_feather'), 0.12);
+  gl.uniform1i(U('u_tex'), 0);
+  gl.activeTexture(gl.TEXTURE0);
+  let totalInliers = 0;
+  for (const e of edges) if (placed.includes(e.i) && placed.includes(e.j)) totalInliers += e.inliers;
+  // Everything needed to re-render each photo on its own, in exactly this panorama's frame —
+  // used by the "aligned layers" download so each layer lines up pixel-for-pixel with this result.
+  const layers = { fbW, fbH, outCenterX, outCenterY, outF: outFscaled, modeNum, f: f || 0, flip: S.flipVertical, items: [] };
+  for (const node of renderNodes){
+    const s = shots[node];
+    const item = { name: s.name, canvas: s.canvas, w: s.w, h: s.h, gain: gains.get(node) || 1, Hsrc: null, Rt: null };
+    if (mode === 'rectilinear'){
+      const cumInv = matInv3(cumulative.get(node));
+      if (!cumInv){ log('warn', `${s.name}: singular placement, skipped`); continue; }
+      const Hsrc = matMul3(cumInv, unmap);
+
+      // Debug logging for rectilinear mode - show homography and verify it makes sense
+      log('debug', `${s.name} rectilinear H=[${Hsrc.map(x=>x.toFixed(4)).join(', ')}], srcSize=${s.w}x${s.h}`);
+
+      gl.uniformMatrix3fv(U('u_Hsrc'), true, new Float32Array(Hsrc));
+      item.Hsrc = Hsrc;
+    } else {
+      const Rt = transpose3(rotations.get(node));
+      gl.uniformMatrix3fv(U('u_Rt'), true, new Float32Array(Rt));
+      item.Rt = Rt;
+    }
+    layers.items.push(item);
+    gl.uniform2f(U('u_srcCenter'), s.w/2, s.h/2);
+    gl.uniform2f(U('u_srcSize'), s.w, s.h);
+    gl.uniform1f(U('u_gain'), gains.get(node) || 1);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, s.canvas);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.deleteTexture(tex);
+  }
+  gl.disable(gl.BLEND);
+
+  const outTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, outTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, fbW, fbH, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const fb2 = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb2);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, outTex, 0);
+  gl.viewport(0,0,fbW,fbH);
+  gl.useProgram(S.progNorm);
+  gl.bindBuffer(gl.ARRAY_BUFFER, S.quadBuf);
+  const posLoc2 = gl.getAttribLocation(S.progNorm, 'a_pos');
+  gl.enableVertexAttribArray(posLoc2); gl.vertexAttribPointer(posLoc2, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform2f(gl.getUniformLocation(S.progNorm,'u_outSize'), fbW, fbH);
+  gl.uniform1i(gl.getUniformLocation(S.progNorm,'u_accum'), 0);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accumTex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // Read back in horizontal bands rather than one gl.readPixels(0,0,fbW,fbH,...) call — the
+  // intermediate float buffer (4 floats/pixel) is the single biggest transient allocation in
+  // this whole pipeline, and for a wide high-res panorama that can be hundreds of MB on its
+  // own. Banding caps that transient allocation to a fixed size regardless of the panorama's
+  // size. rgbF32 below still has to exist at full size (it's the actual deliverable), so this
+  // only trims the readback step itself — the output is byte-for-byte the same either way.
+  const rgbF32 = new Float32Array(fbW*fbH*3);
+  const BAND_BYTES_TARGET = 32*1024*1024; // ~32MB of float32 RGBA per band, regardless of width
+  const bandRows = Math.max(1, Math.min(fbH, Math.floor(BAND_BYTES_TARGET / (fbW*4*4))));
+  for (let yStart=0; yStart<fbH; yStart+=bandRows){
+    const bandH = Math.min(bandRows, fbH-yStart);
+    const band = new Float32Array(fbW*bandH*4);
+    gl.readPixels(0, fbH-yStart-bandH, fbW, bandH, gl.RGBA, gl.FLOAT, band);
+    // WebGL readback is always bottom-up, so within this band too, local row (bandH-1-k) is
+    // what has to land at destination row (yStart+k) to come out right-side-up. Any user-
+    // requested flip is applied afterwards, as a separate post-process step on the finished
+    // image — not tangled up in this conversion.
+    for (let k=0; k<bandH; k++){
+      const localRow = (bandH-1-k)*fbW, dstRow = (yStart+k)*fbW;
+      for (let x=0; x<fbW; x++){
+        const s = (localRow+x)*4, d = (dstRow+x)*3;
+        rgbF32[d]=band[s]; rgbF32[d+1]=band[s+1]; rgbF32[d+2]=band[s+2];
+      }
+    }
+  }
+  gl.deleteTexture(accumTex); gl.deleteTexture(outTex); gl.deleteFramebuffer(fb); gl.deleteFramebuffer(fb2);
+
+  // User-requested vertical flip of the finished panorama: swap each row with its mirror.
+  if (S.flipVertical){
+    const rowLen = fbW*3, tmp = new Float32Array(rowLen);
+    for (let y=0; y<Math.floor(fbH/2); y++){
+      const y2 = fbH-1-y, rowA = y*rowLen, rowB = y2*rowLen;
+      tmp.set(rgbF32.subarray(rowA, rowA+rowLen));
+      rgbF32.set(rgbF32.subarray(rowB, rowB+rowLen), rowA);
+      rgbF32.set(tmp, rowB);
+    }
+  }
+
+  const previewCanvas = document.createElement('canvas'); previewCanvas.width=fbW; previewCanvas.height=fbH;
+  const pctx = previewCanvas.getContext('2d');
+  const id = pctx.createImageData(fbW, fbH);
+  for (let p=0;p<fbW*fbH;p++){
+    id.data[p*4] = Math.max(0,Math.min(255,Math.round(rgbF32[p*3]*255)));
+    id.data[p*4+1] = Math.max(0,Math.min(255,Math.round(rgbF32[p*3+1]*255)));
+    id.data[p*4+2] = Math.max(0,Math.min(255,Math.round(rgbF32[p*3+2]*255)));
+    id.data[p*4+3] = 255;
+  }
+  pctx.putImageData(id, 0, 0);
+
+  return { shotsUsed: placed.map(i=>shots[i].name), w: fbW, h: fbH, rgbF32, previewCanvas, inliers: totalInliers, projection: mode, focal: f, layers };
+}
+
+/* ══════════════════════ RESULTS UI / DOWNLOAD ══════════════ */
+function renderResults(){
+  $('#results').classList.toggle('hidden', S.results.length <= 1);
+  const el = $('#results'); el.innerHTML = '';
+  S.results.forEach((r,i) => {
+    const d = document.createElement('div'); d.className = 'result' + (i===S.selResult ? ' sel' : '');
+    d.innerHTML = `<img src="${r.previewCanvas.toDataURL('image/jpeg',0.6)}"><div class="rl">${r.shotsUsed.length} photos</div>`;
+    d.onclick = () => selectResult(i);
+    el.appendChild(d);
+  });
+  selectResult(0);
+}
+function selectResult(i){
+  S.selResult = i;
+  [...$('#results').children].forEach((el,idx)=>el.classList.toggle('sel', idx===i));
+  const r = S.results[i];
+  if (!r) return;
+  $('#outempty').style.display = 'none';
+  const out = $('#out'); out.style.display='block'; out.width = r.w; out.height = r.h;
+  out.getContext('2d').drawImage(r.previewCanvas, 0, 0);
+  $('#st-size').textContent = `${r.w} × ${r.h}`;
+  $('#st-proj').textContent = r.projection;
+  $('#st-inl').textContent = r.inliers;
+  $('#st-be').textContent = navigator.gpu ? 'WebGPU' : 'WASM';
+  $('#out-pnote').textContent = `${r.shotsUsed.length} photos`;
+  $('#dlrow').classList.remove('hidden');
+  $('#dl-layers').classList.toggle('hidden', !r.layers);
+}
+$('#dl-tiff').onclick = () => {
+  const r = S.results[S.selResult]; if (!r) return;
+  const blob = writeTiff16(r.rgbF32, r.w, r.h);
+  triggerDownload(blob, `panorama_${S.selResult+1}.tif`);
+};
+$('#dl-jpg').onclick = () => { const r = S.results[S.selResult]; if (!r) return; r.previewCanvas.toBlob(b => triggerDownload(b, `panorama_${S.selResult+1}.jpg`), 'image/jpeg', 0.92); };
+$('#dl-png').onclick = () => { const r = S.results[S.selResult]; if (!r) return; r.previewCanvas.toBlob(b => triggerDownload(b, `panorama_${S.selResult+1}.png`), 'image/png'); };
+function triggerDownload(blob, name){
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
+}
+
+/* ══════════════════════ ALIGNED LAYERS (ZIP of transparent PNGs) ═══ */
+// Re-renders a single photo on its own, with the same shader, uniforms, readback orientation
+// and flip as the panorama it came from, so every layer is the panorama's exact size and
+// stacks on it pixel-for-pixel (e.g. "load files into stack" in an image editor). Inside a
+// photo's footprint it's fully opaque with the panorama's exposure gain applied; outside it's
+// transparent.
+function renderLayerCanvas(L, it){
+  const gl = ensureGL(), W = L.fbW, H = L.fbH;
+  const tgt = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tgt);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, W, H, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tgt, 0);
+  try{
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('float framebuffer not supported on this GPU/browser');
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(S.progWarp);
+    gl.bindBuffer(gl.ARRAY_BUFFER, S.quadBuf);
+    const posLoc = gl.getAttribLocation(S.progWarp, 'a_pos');
+    gl.enableVertexAttribArray(posLoc); gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    const U = n => gl.getUniformLocation(S.progWarp, n);
+    gl.uniform2f(U('u_outSize'), W, H);
+    gl.uniform2f(U('u_outCenter'), L.outCenterX, L.outCenterY);
+    gl.uniform1f(U('u_outF'), L.outF);
+    gl.uniform1i(U('u_mode'), L.modeNum);
+    gl.uniform1f(U('u_f'), L.f);
+    gl.uniform1f(U('u_feather'), 0.12);
+    gl.uniform1i(U('u_tex'), 0);
+    if (it.Hsrc) gl.uniformMatrix3fv(U('u_Hsrc'), true, new Float32Array(it.Hsrc));
+    else gl.uniformMatrix3fv(U('u_Rt'), true, new Float32Array(it.Rt));
+    gl.uniform2f(U('u_srcCenter'), it.w/2, it.h/2);
+    gl.uniform2f(U('u_srcSize'), it.w, it.h);
+    gl.uniform1f(U('u_gain'), it.gain);
+    gl.activeTexture(gl.TEXTURE0);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, it.canvas);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.deleteTexture(tex);
+
+    // Same row mapping as buildPanorama's readback + flip: destination row r comes from GL
+    // row H-1-r, or from GL row r when the panorama was flipped.
+    const out = document.createElement('canvas'); out.width = W; out.height = H;
+    const ctx = out.getContext('2d');
+    const bandRows = Math.max(1, Math.min(H, Math.floor(32*1024*1024 / (W*16))));
+    for (let g0=0; g0<H; g0+=bandRows){
+      const bh = Math.min(bandRows, H-g0);
+      const band = new Float32Array(W*bh*4);
+      gl.readPixels(0, g0, W, bh, gl.RGBA, gl.FLOAT, band);
+      const img = ctx.createImageData(W, bh), d = img.data;
+      for (let m=0; m<bh; m++){
+        const src = (L.flip ? m : bh-1-m)*W*4, dst = m*W*4;
+        for (let x=0; x<W; x++){
+          const s = src + x*4, a = band[s+3], o = dst + x*4;
+          if (a <= 0.0005) continue;
+          d[o]   = Math.max(0, Math.min(255, Math.round(band[s]  /a*255)));
+          d[o+1] = Math.max(0, Math.min(255, Math.round(band[s+1]/a*255)));
+          d[o+2] = Math.max(0, Math.min(255, Math.round(band[s+2]/a*255)));
+          d[o+3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, L.flip ? g0 : H-g0-bh);
+    }
+    return out;
+  } finally {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb); gl.deleteTexture(tgt);
+  }
+}
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n=0;n<256;n++){ let c = n; for (let k=0;k<8;k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(bytes){
+  let c = 0xFFFFFFFF;
+  for (let i=0;i<bytes.length;i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+// Uncompressed ("stored") ZIP — the PNGs are already compressed. Entries keep their blobs as
+// blobs rather than copies, so the archive doesn't have to sit in JS memory all at once.
+function makeZip(entries){ // entries: [{ name, blob, crc, size }]
+  const enc = new TextEncoder(), parts = [], central = [];
+  let offset = 0;
+  for (const e of entries){
+    const name = enc.encode(e.name), h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true);
+    h.setUint16(8, 0, true); h.setUint16(10, 0, true); h.setUint16(12, 0x21, true);
+    h.setUint32(14, e.crc, true); h.setUint32(18, e.size, true); h.setUint32(22, e.size, true);
+    h.setUint16(26, name.length, true); h.setUint16(28, 0, true);
+    parts.push(h.buffer, name, e.blob);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+    c.setUint16(10, 0, true); c.setUint16(12, 0, true); c.setUint16(14, 0x21, true);
+    c.setUint32(16, e.crc, true); c.setUint32(20, e.size, true); c.setUint32(24, e.size, true);
+    c.setUint16(28, name.length, true); c.setUint32(42, offset, true);
+    central.push(c.buffer, name);
+    offset += 30 + name.length + e.size;
+    if (offset > 0xFFFFFFFF) throw new Error('layers exceed 4GB — too large for a ZIP without ZIP64');
+  }
+  const cdSize = central.reduce((s, p) => s + p.byteLength, 0), eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, entries.length, true); eocd.setUint16(10, entries.length, true);
+  eocd.setUint32(12, cdSize, true); eocd.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, eocd.buffer], { type: 'application/zip' });
+}
+let _layersBusy = false;
+$('#dl-layers').onclick = async () => {
+  const r = S.results[S.selResult];
+  if (!r || !r.layers || _layersBusy) return;
+  _layersBusy = true; $('#dl-layers').disabled = true;
+  const items = r.layers.items, entries = [];
+  try{
+    for (let i=0;i<items.length;i++){
+      setProgress(i/items.length, `rendering layer ${i+1}/${items.length}: ${items[i].name}`);
+      await new Promise(res => setTimeout(res, 0)); // let the progress label paint between layers
+      const canvas = renderLayerCanvas(r.layers, items[i]);
+      const blob = await new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error('PNG encoding failed')), 'image/png'));
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const base = items[i].name.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_');
+      entries.push({ name: `layer_${String(i+1).padStart(2,'0')}_${base}.png`, blob, crc: crc32(bytes), size: bytes.length });
+    }
+    triggerDownload(makeZip(entries), `panorama_${S.selResult+1}_layers.zip`);
+    log('ok', `exported ${entries.length} aligned layers (${r.w}×${r.h} each)`);
+  }catch(e){
+    log('err', `layer export failed: ${errMsg(e)}`);
+  }finally{
+    setProgress(null); _layersBusy = false; $('#dl-layers').disabled = false;
+  }
+};
+/* ══════════════════════ ADD A PHOTO TO A PANORAMA ═══════════ */
+// Matches one extra photo against a finished panorama and warps it into the panorama's frame
+// with a single homography, growing the canvas if it sticks out. SIFT is used whatever the
+// matcher setting: the photo and the panorama are very different sizes, and SIFT's scale space
+// copes with that, needs no model, and runs on low-memory devices. A homography is exact for
+// a rectilinear panorama; on a cylindrical/equirectangular one it's a local approximation that's
+// good over the overlap but drifts further out, which is a limit of warping into a finished
+// image rather than re-solving the whole stitch.
+const ADDP_PANO_FEATURES = 8000;
+function addpMatch(fPhoto, fPano){
+  const pts = siftMatchFeatures(fPhoto, fPano);
+  let res = ransacHomography(pts, 2);
+  if (!res || res.inliers < 12) res = ransacHomography(pts, 3);
+  if (!res || res.inliers < 12) res = ransacHomography(pts, 4);
+  return { pts, res, ok: !!res && res.inliers >= 12 && res.inliers/res.total >= 0.25 };
+}
+// Hm maps photo match-canvas px -> panorama match-canvas px; returns full-resolution
+// photo px -> panorama px, plus where the photo lands and how big the output has to be.
+function addpLayout(Hm, photoW, photoH, photoMW, photoMH, panoW, panoH, panoMW, panoMH){
+  const Hf = matMul3(matMul3([panoW/panoMW,0,0, 0,panoH/panoMH,0, 0,0,1], toMat3(Hm)), [photoMW/photoW,0,0, 0,photoMH/photoH,0, 0,0,1]);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const N = 16;
+  for (let i=0;i<=N;i++) for (const [x, y] of [[i/N*photoW, 0], [i/N*photoW, photoH], [0, i/N*photoH], [photoW, i/N*photoH]]){
+    const w = Hf[6]*x + Hf[7]*y + Hf[8];
+    if (!(w > 1e-9)) throw new Error('the matched position folds the photo behind the camera — the match is not trustworthy');
+    const px = (Hf[0]*x + Hf[1]*y + Hf[2])/w, py = (Hf[3]*x + Hf[4]*y + Hf[5])/w;
+    minX = Math.min(minX, px); maxX = Math.max(maxX, px); minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+  }
+  const areaRatio = ((maxX-minX)*(maxY-minY)) / (photoW*photoH);
+  const ox = -Math.floor(Math.min(0, minX)), oy = -Math.floor(Math.min(0, minY));
+  const outW = Math.ceil(Math.max(panoW, maxX)) + ox, outH = Math.ceil(Math.max(panoH, maxY)) + oy;
+  const bx0 = Math.max(0, Math.floor(minX + ox)), by0 = Math.max(0, Math.floor(minY + oy));
+  const bx1 = Math.min(outW, Math.ceil(maxX + ox)), by1 = Math.min(outH, Math.ceil(maxY + oy));
+  return { Hf, ox, oy, outW, outH, bx0, by0, bw: bx1-bx0, bh: by1-by0, areaRatio, minX, minY, maxX, maxY };
+}
+function scaledCanvas(src, maxSide){
+  const sc = Math.min(1, maxSide / Math.max(src.width, src.height));
+  const w = Math.max(2, Math.round(src.width*sc)), h = Math.max(2, Math.round(src.height*sc));
+  if (w === src.width && h === src.height) return src;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(src, 0, 0, w, h);
+  return c;
+}
+function canvasGray(c){ return toGrayFloat(c.getContext('2d', {willReadFrequently:true}).getImageData(0, 0, c.width, c.height)); }
+// Renders the photo into a bw x bh box of the output with the panorama warp shader (rectilinear
+// mode, direct homography), and hands each read-back band to onBand as (rgbaFloat, firstRow,
+// rows). Row r of a band here IS output row r: the homography is built in the same
+// GL-row-is-output-row frame the readback returns, so no flipping is involved.
+function addpWarp(photo, Hinv, L, onBand){
+  const gl = ensureGL(), mt = maxTex();
+  if (L.bw > mt || L.bh > mt) throw new Error(`the warped photo would be ${L.bw}×${L.bh}px, beyond this GPU's ${mt}px texture limit`);
+  const texCanvas = scaledCanvas(photo, mt), tw = texCanvas.width, th = texCanvas.height;
+  // box pixel -> output pixel -> panorama pixel -> photo pixel -> texture pixel
+  const Hsrc = matMul3(matMul3([tw/photo.width,0,0, 0,th/photo.height,0, 0,0,1], Hinv), [1,0,L.bx0-L.ox, 0,1,L.by0-L.oy, 0,0,1]);
+  const tgt = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tgt);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, L.bw, L.bh, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tgt, 0);
+  try{
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('float framebuffer not supported on this GPU/browser');
+    gl.viewport(0, 0, L.bw, L.bh);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(S.progWarp);
+    gl.bindBuffer(gl.ARRAY_BUFFER, S.quadBuf);
+    const posLoc = gl.getAttribLocation(S.progWarp, 'a_pos');
+    gl.enableVertexAttribArray(posLoc); gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    const U = n => gl.getUniformLocation(S.progWarp, n);
+    gl.uniform2f(U('u_outSize'), L.bw, L.bh);
+    gl.uniform2f(U('u_outCenter'), 0, 0);
+    gl.uniform1f(U('u_outF'), 0);
+    gl.uniform1i(U('u_mode'), 0);
+    gl.uniform1f(U('u_f'), 0);
+    gl.uniform1f(U('u_feather'), 0.12);
+    gl.uniform1i(U('u_tex'), 0);
+    gl.uniformMatrix3fv(U('u_Hsrc'), true, new Float32Array(Hsrc));
+    gl.uniform2f(U('u_srcCenter'), tw/2, th/2);
+    gl.uniform2f(U('u_srcSize'), tw, th);
+    gl.uniform1f(U('u_gain'), 1);
+    gl.activeTexture(gl.TEXTURE0);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texCanvas);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.deleteTexture(tex);
+    const bandRows = Math.max(1, Math.min(L.bh, Math.floor(32*1024*1024 / (L.bw*16))));
+    for (let g0=0; g0<L.bh; g0+=bandRows){
+      const rows = Math.min(bandRows, L.bh-g0), band = new Float32Array(L.bw*rows*4);
+      gl.readPixels(0, g0, L.bw, rows, gl.RGBA, gl.FLOAT, band);
+      onBand(band, g0, rows);
+    }
+  } finally {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb); gl.deleteTexture(tgt);
+  }
+}
+S.addp = { pano: null, panoName: '', photo: null, photoName: '', busy: false };
+function addpRefresh(){
+  const a = S.addp;
+  $('#addp-pano-info').textContent = a.pano ? `panorama: ${a.panoName} — ${a.pano.width} × ${a.pano.height}` : 'No panorama loaded yet.';
+  $('#addp-photo-info').textContent = a.photo ? `photo to add: ${a.photoName} — ${a.photo.width} × ${a.photo.height}` : 'No photo chosen yet.';
+  $('#addp-run').disabled = !(a.pano && a.photo) || a.busy;
+}
+$('#addp-use-result').onclick = () => {
+  const r = S.results[S.selResult];
+  if (!r){ log('warn', 'no panorama result to use — stitch one first'); return; }
+  S.addp.pano = r.previewCanvas; S.addp.panoName = `panorama ${S.selResult+1}`;
+  addpRefresh();
+};
+$('#addp-load-pano-btn').onclick = () => $('#addp-load-pano').click();
+$('#addp-load-pano').onchange = async () => {
+  const f = $('#addp-load-pano').files[0]; if (!f) return;
+  try{ S.addp.pano = await decodeFile(f); S.addp.panoName = f.name; addpRefresh(); }
+  catch(e){ log('err', `could not load "${f.name}": ${errMsg(e)}`); }
+};
+$('#addp-load-photo-btn').onclick = () => $('#addp-load-photo').click();
+$('#addp-load-photo').onchange = async () => {
+  const f = $('#addp-load-photo').files[0]; if (!f) return;
+  try{ S.addp.photo = await decodeFile(f); S.addp.photoName = f.name; addpRefresh(); }
+  catch(e){ log('err', `could not load "${f.name}": ${errMsg(e)}`); }
+};
+$('#addp-run').onclick = async () => {
+  const a = S.addp;
+  if (!a.pano || !a.photo || a.busy) return;
+  a.busy = true; addpRefresh();
+  const tick = () => new Promise(res => setTimeout(res, 0));
+  try{
+    const mode = $('#addp-mode').value;
+    const photoM = scaledCanvas(a.photo, MATCH_RES);
+    const panoM = scaledCanvas(a.pano, S.lowMemoryMode ? 2048 : 3072);
+    setProgress(0.05, `finding features in ${a.photoName}`); await tick();
+    const fPhoto = siftFeatures(canvasGray(photoM), photoM.width, photoM.height);
+    setProgress(0.25, 'finding features in the panorama'); await tick();
+    const fPano = siftFeatures(canvasGray(panoM), panoM.width, panoM.height, ADDP_PANO_FEATURES);
+    setProgress(0.55, `matching ${fPhoto.n} photo features against ${fPano.n} panorama features`); await tick();
+    const m = addpMatch(fPhoto, fPano);
+    log('info', `add photo: ${m.pts.length} SIFT matches, RANSAC ${m.res ? m.res.inliers+'/'+m.res.total+' inliers' : 'FAILED'}`);
+    if (!m.ok) throw new Error(`couldn't place ${a.photoName} in the panorama reliably — not enough consistent matches (does it actually overlap it?)`);
+    const L = addpLayout(m.res.H, a.photo.width, a.photo.height, photoM.width, photoM.height, a.pano.width, a.pano.height, panoM.width, panoM.height);
+    if (!(L.areaRatio > 0.02 && L.areaRatio < 50)) throw new Error('the match would shrink or stretch the photo implausibly — not trusting it');
+    if (L.outW > 32767 || L.outH > 32767 || L.outW*L.outH > 250e6) throw new Error(`the result would be ${L.outW}×${L.outH}px, too large for a browser canvas`);
+    const Hinv = matInv3(L.Hf);
+    if (!Hinv) throw new Error('degenerate placement');
+    setProgress(0.75, `warping ${a.photoName} into the panorama`); await tick();
+    const out = document.createElement('canvas'); out.width = L.outW; out.height = L.outH;
+    const ctx = out.getContext('2d');
+    ctx.drawImage(a.pano, L.ox, L.oy);
+    const region = ctx.getImageData(L.bx0, L.by0, L.bw, L.bh), d = region.data;
+    addpWarp(a.photo, Hinv, L, (band, g0, rows) => {
+      for (let m2=0; m2<rows; m2++){
+        for (let x=0; x<L.bw; x++){
+          const s = (m2*L.bw + x)*4, w = band[s+3];
+          if (w <= 0.0005) continue;
+          const o = ((g0+m2)*L.bw + x)*4;
+          // "empty" = transparent, or (near-)black — the app fills uncovered panorama areas with
+          // black, and JPEG compression leaves those not quite zero
+          const covered = d[o+3] > 0 && d[o] + d[o+1] + d[o+2] > 8;
+          if (mode === 'fill' && covered) continue;
+          const nr = Math.min(255, band[s]/w*255), ng = Math.min(255, band[s+1]/w*255), nb = Math.min(255, band[s+2]/w*255);
+          const k = covered ? Math.min(1, w) : 1; // shader's feather weight: fades the photo in from its own edges
+          d[o]   = Math.round(d[o]  *(1-k) + nr*k);
+          d[o+1] = Math.round(d[o+1]*(1-k) + ng*k);
+          d[o+2] = Math.round(d[o+2]*(1-k) + nb*k);
+          d[o+3] = 255;
+        }
+      }
+    });
+    ctx.putImageData(region, L.bx0, L.by0);
+    a.result = out;
+    a.pano = out; a.panoName = `${a.panoName} + ${a.photoName}`; // so further photos build on this one
+    $('#addp-outempty').style.display = 'none';
+    const view = $('#addp-out'); view.style.display = 'block'; view.width = out.width; view.height = out.height;
+    view.getContext('2d').drawImage(out, 0, 0);
+    $('#addp-dlrow').classList.remove('hidden');
+    $('#addp-result-info').textContent = `added ${a.photoName} (${m.res.inliers} matched points) — panorama is now ${out.width} × ${out.height}. Choose another photo to keep adding.`;
+    log('ok', `added ${a.photoName} to the panorama — now ${out.width}×${out.height}`);
+  }catch(e){
+    log('err', `add photo failed: ${errMsg(e)}`);
+    $('#addp-result-info').textContent = `Failed: ${errMsg(e)}`;
+  }finally{
+    setProgress(null); a.busy = false; addpRefresh();
+  }
+};
+$('#addp-dl-png').onclick = () => { if (S.addp.result) S.addp.result.toBlob(b => triggerDownload(b, 'panorama_added.png'), 'image/png'); };
+$('#addp-dl-jpg').onclick = () => { if (S.addp.result) S.addp.result.toBlob(b => triggerDownload(b, 'panorama_added.jpg'), 'image/jpeg', 0.92); };
+$('#addp-dl-tiff').onclick = () => {
+  const c = S.addp.result; if (!c) return;
+  const w = c.width, h = c.height, data = c.getContext('2d', {willReadFrequently:true}).getImageData(0, 0, w, h).data;
+  const rgbF32 = new Float32Array(w*h*3);
+  for (let p=0;p<w*h;p++){ rgbF32[p*3] = data[p*4]/255; rgbF32[p*3+1] = data[p*4+1]/255; rgbF32[p*3+2] = data[p*4+2]/255; }
+  triggerDownload(writeTiff16(rgbF32, w, h), 'panorama_added.tif');
+};
+
+/* ── misc UI ── */
+$('#copy-urls').onclick = () => { navigator.clipboard?.writeText($('#model-urls').textContent); log('info','release URLs copied'); };
+
+/* ══════════════════════ ZENITH / NADIR POLE PATCHES ═══════ */
+// Gnomonic (rectilinear) projection centred on a pole: forward axis is +Y for zenith, -Y for
+// nadir — the same x=sin(lon)cos(lat), y=sin(lat), z=cos(lon)cos(lat) ray convention the
+// equirectangular renderer above already uses, so this is just that math run both directions.
+function poleDirToLonLat(dx, dy, dz){
+  const n = Math.hypot(dx, dy, dz);
+  return [ Math.atan2(dx/n, dz/n), Math.asin(Math.max(-1, Math.min(1, dy/n))) ];
+}
+function sampleEquirectRGB(data, w, h, sx, sy){
+  sx = ((sx % w) + w) % w; // longitude wraps; a pole patch's edge spans the full ±180° range
+  sy = Math.max(0, Math.min(h-1.001, sy));
+  const x0 = Math.floor(sx), x1 = (x0+1)%w, y0 = Math.floor(sy), y1 = Math.min(h-1, y0+1);
+  const fx = sx-x0, fy = sy-y0;
+  const at = (xx,yy) => { const i=(yy*w+xx)*4; return [data[i],data[i+1],data[i+2]]; };
+  const a=at(x0,y0), b=at(x1,y0), c=at(x0,y1), d=at(x1,y1);
+  return [0,1,2].map(k => a[k]*(1-fx)*(1-fy) + b[k]*fx*(1-fy) + c[k]*(1-fx)*fy + d[k]*fx*fy);
+}
+function sampleRGBBilinear(data, w, h, sx, sy){
+  sx = Math.max(0, Math.min(w-1.001, sx)); sy = Math.max(0, Math.min(h-1.001, sy));
+  const x0=Math.floor(sx), x1=Math.min(w-1,x0+1), y0=Math.floor(sy), y1=Math.min(h-1,y0+1);
+  const fx=sx-x0, fy=sy-y0;
+  const at=(xx,yy)=>{ const i=(yy*w+xx)*4; return [data[i],data[i+1],data[i+2]]; };
+  const a=at(x0,y0), b=at(x1,y0), c=at(x0,y1), d=at(x1,y1);
+  return [0,1,2].map(k => a[k]*(1-fx)*(1-fy) + b[k]*fx*(1-fy) + c[k]*(1-fx)*fy + d[k]*fx*fy);
+}
+
+function poleSrcInfo(){
+  const p = S.pole;
+  $('#pole-src-info').textContent = p.srcCanvas ? `equirectangular source: ${p.srcW} × ${p.srcH}` : 'No equirectangular image loaded yet.';
+  $('#pole-extract-zenith').disabled = !p.srcCanvas;
+  $('#pole-extract-nadir').disabled = !p.srcCanvas;
+  updatePoleCompositeReady();
+}
+function updatePoleCompositeReady(){
+  $('#pole-composite').disabled = !(S.pole.srcCanvas && (S.pole.zenithPatch || S.pole.nadirPatch));
+}
+function setPoleSource(canvas){
+  S.pole.srcCanvas = canvas; S.pole.srcW = canvas.width; S.pole.srcH = canvas.height;
+  S.pole.zenithPatch = null; S.pole.nadirPatch = null;
+  $('#pole-extract-preview').innerHTML = ''; $('#pole-extract-preview').classList.add('hidden');
+  $('#pole-reimport-info').textContent = '';
+  poleSrcInfo();
+  log('ok', `zenith/nadir source set: ${canvas.width}×${canvas.height}`);
+}
+$('#pole-use-result').onclick = () => {
+  const r = S.results[S.selResult];
+  if (!r){ log('warn', 'no panorama result to use — stitch one first'); return; }
+  if (r.projection !== 'equirectangular') log('warn', `the selected result is ${r.projection}, not equirectangular — zenith/nadir extraction assumes an equirectangular source`);
+  setPoleSource(r.previewCanvas);
+};
+$('#pole-load-btn').onclick = () => $('#pole-load-input').click();
+$('#pole-load-input').onchange = async () => {
+  const f = $('#pole-load-input').files[0]; if (!f) return;
+  try{ setPoleSource(await decodeFile(f)); }
+  catch(e){ log('err', `could not load "${f.name}": ${errMsg(e)}`); }
+};
+
+function readPoleParams(){
+  S.pole.fov = Math.max(10, Math.min(178, +$('#pole-fov').value || 110));
+  S.pole.size = +$('#pole-size').value || 2048;
+  return { fov: S.pole.fov, size: S.pole.size, feather: Math.max(0, +$('#pole-feather').value || 8) };
+}
+function extractPole(isZenith){
+  const { fov, size } = readPoleParams();
+  const src = S.pole.srcCanvas, sw = src.width, sh = src.height;
+  const sdata = src.getContext('2d', {willReadFrequently:true}).getImageData(0,0,sw,sh).data;
+  const f = (size/2) / Math.tan(fov*Math.PI/180/2);
+  const sign = isZenith ? 1 : -1;
+  const canvas = document.createElement('canvas'); canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const id = ctx.createImageData(size, size);
+  for (let py=0; py<size; py++){
+    const cy = py - size/2;
+    for (let px=0; px<size; px++){
+      const cx = px - size/2;
+      const [lon, lat] = poleDirToLonLat(cx/f, sign, cy/f);
+      const sx = (lon/(2*Math.PI) + 0.5) * sw;
+      const sy = (0.5 - lat/Math.PI) * sh;
+      const [r,g,b] = sampleEquirectRGB(sdata, sw, sh, sx, sy);
+      const o = (py*size+px)*4;
+      id.data[o]=r; id.data[o+1]=g; id.data[o+2]=b; id.data[o+3]=255;
+    }
+  }
+  ctx.putImageData(id, 0, 0);
+  if (isZenith) S.pole.zenithPatch = canvas; else S.pole.nadirPatch = canvas;
+  renderPolePreview();
+  updatePoleCompositeReady();
+  log('ok', `extracted ${isZenith?'zenith':'nadir'} patch: ${size}×${size}px, ${fov}° FOV`);
+}
+function renderPolePreview(){
+  const el = $('#pole-extract-preview'); el.innerHTML = '';
+  const add = (canvas, label) => {
+    if (!canvas) return;
+    const d = document.createElement('div'); d.className = 'result';
+    d.innerHTML = `<img src="${canvas.toDataURL('image/jpeg',0.8)}"><div class="rl">${label}</div>`;
+    d.onclick = () => canvas.toBlob(b => triggerDownload(b, `panorama_${label.toLowerCase()}_patch.png`), 'image/png');
+    el.appendChild(d);
+  };
+  add(S.pole.zenithPatch, 'Zenith'); add(S.pole.nadirPatch, 'Nadir');
+  el.classList.toggle('hidden', !el.children.length);
+}
+$('#pole-extract-zenith').onclick = () => { if (S.pole.srcCanvas) extractPole(true); };
+$('#pole-extract-nadir').onclick = () => { if (S.pole.srcCanvas) extractPole(false); };
+
+async function loadPolePatch(file, isZenith){
+  const canvas = await decodeFile(file);
+  if (isZenith) S.pole.zenithPatch = canvas; else S.pole.nadirPatch = canvas;
+  renderPolePreview();
+  updatePoleCompositeReady();
+  $('#pole-reimport-info').textContent = `loaded ${isZenith?'zenith':'nadir'} patch: ${canvas.width}×${canvas.height}px — make sure this matches the FOV/size you extracted with (${S.pole.fov}°, ${S.pole.size}px)`;
+  log('ok', `loaded processed ${isZenith?'zenith':'nadir'} patch "${file.name}": ${canvas.width}×${canvas.height}`);
+}
+$('#pole-reimport-zenith-btn').onclick = () => $('#pole-reimport-zenith-input').click();
+$('#pole-reimport-zenith-input').onchange = async () => {
+  const f = $('#pole-reimport-zenith-input').files[0]; if (!f) return;
+  try{ await loadPolePatch(f, true); }catch(e){ log('err', `could not load "${f.name}": ${errMsg(e)}`); }
+};
+$('#pole-reimport-nadir-btn').onclick = () => $('#pole-reimport-nadir-input').click();
+$('#pole-reimport-nadir-input').onchange = async () => {
+  const f = $('#pole-reimport-nadir-input').files[0]; if (!f) return;
+  try{ await loadPolePatch(f, false); }catch(e){ log('err', `could not load "${f.name}": ${errMsg(e)}`); }
+};
+
+$('#pole-composite').onclick = () => {
+  try{ compositeIntoEquirect(); }
+  catch(e){ log('err', `compositing failed: ${errMsg(e)}`); }
+};
+function compositeIntoEquirect(){
+  const { fov, feather } = readPoleParams();
+  const src = S.pole.srcCanvas, sw = src.width, sh = src.height;
+  const out = src.getContext('2d', {willReadFrequently:true}).getImageData(0,0,sw,sh); // edited in place
+  const outerColat = fov*Math.PI/180/2, innerColat = Math.max(0, outerColat - feather*Math.PI/180);
+
+  const applyPole = (patch, sign) => {
+    if (!patch) return;
+    const pw = patch.width, ph = patch.height;
+    const pdata = patch.getContext('2d', {willReadFrequently:true}).getImageData(0,0,pw,ph).data;
+    const pf = (pw/2) / Math.tan(outerColat); // the patch's own focal, independent of any size mismatch
+    const latAtOuter = Math.PI/2 - outerColat;
+    const yStart = sign > 0 ? 0 : Math.max(0, Math.floor((0.5 + latAtOuter/Math.PI) * sh) - 2);
+    const yEnd   = sign > 0 ? Math.min(sh, Math.ceil((0.5 - latAtOuter/Math.PI) * sh) + 2) : sh;
+    for (let y=yStart; y<yEnd; y++){
+      const lat = (0.5 - y/sh) * Math.PI;
+      const colat = sign > 0 ? (Math.PI/2 - lat) : (Math.PI/2 + lat);
+      if (colat > outerColat) continue;
+      const weight = colat <= innerColat ? 1 : (outerColat - colat) / Math.max(1e-6, outerColat - innerColat);
+      if (weight <= 0) continue;
+      for (let x=0; x<sw; x++){
+        const lon = (x/sw - 0.5) * 2*Math.PI;
+        const dx = Math.sin(lon)*Math.cos(lat), dy = Math.sin(lat), dz = Math.cos(lon)*Math.cos(lat);
+        if (!(sign*dy > 1e-6)) continue; // inverse gnomonic is undefined behind the camera
+        const px = pf*sign*dx/dy + pw/2, py = pf*sign*dz/dy + ph/2;
+        if (px < 0 || py < 0 || px >= pw-1 || py >= ph-1) continue;
+        const [r,g,b] = sampleRGBBilinear(pdata, pw, ph, px, py);
+        const o = (y*sw+x)*4;
+        out.data[o]   = out.data[o]  *(1-weight) + r*weight;
+        out.data[o+1] = out.data[o+1]*(1-weight) + g*weight;
+        out.data[o+2] = out.data[o+2]*(1-weight) + b*weight;
+      }
+    }
+  };
+  applyPole(S.pole.zenithPatch, 1);
+  applyPole(S.pole.nadirPatch, -1);
+
+  const canvas = document.createElement('canvas'); canvas.width = sw; canvas.height = sh;
+  canvas.getContext('2d').putImageData(out, 0, 0);
+  S.pole.resultCanvas = canvas; S.pole.resultW = sw; S.pole.resultH = sh;
+
+  $('#pole-outempty').style.display = 'none';
+  const outEl = $('#pole-out'); outEl.style.display = 'block'; outEl.width = sw; outEl.height = sh;
+  outEl.getContext('2d').drawImage(canvas, 0, 0);
+  $('#pole-dlrow').classList.remove('hidden');
+  log('ok', `composited zenith/nadir patch(es) into the equirectangular image (${sw}×${sh})`);
+}
+$('#pole-dl-png').onclick = () => { if (S.pole.resultCanvas) S.pole.resultCanvas.toBlob(b => triggerDownload(b, 'panorama_poles_composited.png'), 'image/png'); };
+$('#pole-dl-jpg').onclick = () => { if (S.pole.resultCanvas) S.pole.resultCanvas.toBlob(b => triggerDownload(b, 'panorama_poles_composited.jpg'), 'image/jpeg', 0.92); };
+$('#pole-dl-tiff').onclick = () => {
+  if (!S.pole.resultCanvas) return;
+  const w = S.pole.resultW, h = S.pole.resultH;
+  const data = S.pole.resultCanvas.getContext('2d', {willReadFrequently:true}).getImageData(0,0,w,h).data;
+  const rgbF32 = new Float32Array(w*h*3);
+  for (let p=0;p<w*h;p++){ rgbF32[p*3]=data[p*4]/255; rgbF32[p*3+1]=data[p*4+1]/255; rgbF32[p*3+2]=data[p*4+2]/255; }
+  triggerDownload(writeTiff16(rgbF32, w, h), 'panorama_poles_composited.tif');
+};
+
+/* ── theme toggle ── */
+function applyThemeButton(){ $('#theme-btn').textContent = document.documentElement.dataset.theme === 'dark' ? 'Light mode' : 'Dark mode'; }
+$('#theme-btn').onclick = () => {
+  const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem('panostitch.theme', t);
+  applyThemeButton();
+};
+applyThemeButton();
+
+/* ── INITIALIZATION ── */
+boot();
+</script>
+</body>
+</html>

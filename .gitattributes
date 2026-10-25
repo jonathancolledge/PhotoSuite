@@ -1,0 +1,8 @@
+# shell scripts must keep LF line endings to run on Linux; Windows scripts get CRLF
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.py   text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf

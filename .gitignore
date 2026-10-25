@@ -1,0 +1,23 @@
+# Python environments (one folder can serve Windows and Linux)
+.venv/
+.venv-linux/
+__pycache__/
+*.pyc
+
+# models are downloaded, never committed (see README.md)
+models/*
+!models/README.md
+
+# your data and settings
+PhotoLibrary/library/
+*_settings.json
+*_settings_linux.json
+
+# MPRNet's architecture is under a non-commercial licence: keep a local copy out of this GPL repository
+RAWDemosaic/rawdemosaic/dl_models/restore/mprnet.py
+
+# editors and OS
+.vscode/
+*.code-workspace
+Thumbs.db
+.DS_Store

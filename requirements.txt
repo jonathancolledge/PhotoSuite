@@ -1,0 +1,38 @@
+# One environment for Photo Library, RAW Demosaic and PANOSTITCH.
+#
+# Not listed here, because the installers choose them for the machine:
+#   torch, torchvision   from PyTorch's CUDA 13.0 index (PyPI's Windows "torch" is CPU-only), or its CPU index
+#   onnxruntime-gpu      with an NVIDIA GPU (CUDA 12 build as a fallback), else onnxruntime
+#   sam2                 a source package whose build imports torch: installed after it, without build isolation
+#   bm3d                 free for non-commercial use only (not open source): installed only when you agree;
+#                        RAW Demosaic's BM3D option needs it, everything else works without it
+numpy
+scipy
+Pillow
+tifffile
+rawpy
+numba
+ExifRead
+opencv-python-headless
+psutil
+
+# RAW Demosaic
+colour-science
+rawforge
+onnx
+hydra-core
+iopath
+
+# PANOSTITCH
+PyMaxflow
+
+# Photo Library's AI (faces run on ONNX Runtime; SigLIP2 and Florence-2 on transformers)
+huggingface_hub
+transformers
+tokenizers
+sentencepiece
+protobuf
+einops
+timm
+safetensors
+accelerate
