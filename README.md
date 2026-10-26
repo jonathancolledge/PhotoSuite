@@ -1,12 +1,12 @@
 # Photo Suite
 
-Three desktop apps for photographers that work together, sharing one Python environment and one models folder.
+Three desktop applications for photographers. The applications work together, sharing one Python environment and one models folder.
 They run on Windows and Linux, and use an NVIDIA GPU when there is one.
 
 | App | What it does |
 |---|---|
-| **Photo Library** | Catalogues your photos where they already are. It only reads them: it never moves, changes or deletes a file. Browse by the folder tree on disk or by the date taken; rate (0–5 stars), tag and describe many photos at once; filter by rating, tags, people or any EXIF value (camera, lens, ISO, aperture, shutter, focal length, date, GPS) and save filters as virtual folders. Optional AI finds faces, makes photos searchable by meaning ("dog on a beach") and writes captions with tags. Sends a selection to RAW Demosaic or PANOSTITCH. |
-| **RAW Demosaic** | RAW processing: AMaZE, RCD, Malvar and bilinear demosaicing (Markesteijn for Fuji X-Trans), AI RAW denoising (NIND-Unet, RawForge), several processings of one file blended by weight, masked blending with SAM2, super-resolution and restoration models, and a develop tab. Batch processing from a saved settings file. |
+| **Photo Library** | Catalogues your photos. It only reads them: it never moves, changes, or deletes a file. Browse by the folder tree on disk or by the date taken; rate (0–5 stars); tag and describe many photos at once; filter by rating, tags, people or any EXIF value (camera, lens, ISO, aperture, shutter, focal length, date, GPS) and save filters as virtual folders. Optional AI finds faces, makes photos searchable by meaning ("dog on a beach"); and writes captions with tags. You can a selection to RAW Demosaic or PANOSTITCH. |
+| **RAW Demosaic** | RAW processing: AMaZE, RCD, Malvar and bilinear demosaicing (Markesteijn for Fuji X-Trans), AI RAW denoising (NIND-Unet, RawForge). You can blend several demosaicing methods by weight, or use masked blending with SAM2. It also offers super-resolution and restoration models, and a develop tab. Batch processing from a saved settings file.| When blending RAW denoise NIND-Unet, TreeNet Heavy via Rawforge, AMaZE (lesser weight should be given to NIND-Unet to preserve detail), and following with super resolution 0.8 RealSR and 0.2 RealESRGAN, results  or beat most commercial denoise models. |
 | **PANOSTITCH** | Panorama stitching with RaCo-ALIKED + LightGlue matching (SIFT fallback): rectilinear, cylindrical and 360° projections, parallax correction, seam cutting, multi-band blending, horizon straightening, zenith/nadir editing, Hugin export. |
 
 RAW Demosaic and PANOSTITCH also have single-file browser versions, `RAWDemosaic/rawdemosaic.html` and
@@ -14,7 +14,7 @@ RAW Demosaic and PANOSTITCH also have single-file browser versions, `RAWDemosaic
 
 ## Install
 
-You need Python 3.11 or newer (the Windows installer offers to install it) and an internet connection. The first
+You need Python 3.11 or newer (the Windows installer offers to install it) and a fast internet connection. The first
 install downloads 3–4 GB of packages. For the GPU you need an NVIDIA driver 580 or newer.
 
 ```
