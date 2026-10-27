@@ -478,7 +478,7 @@ def _colour(px, sat, vib, any_hsl, hue_a, sat_a, lum_a, eq_on, eq_hue, eq_sat, e
                 if d < 0: d += 360
                 u = d / span; u = u * u * (3 - 2 * u)
                 w0 = 1 - u; w1 = u; cw = min(1.0, C / 0.06)
-                hh += (w0 * hue_a[i0] + w1 * hue_a[i1]) / 100 * 30 * cw
+                hh += (w0 * hue_a[i0] + w1 * hue_a[i1]) / 100 * 180 * cw   # ±100 = ±180°: the whole colour wheel
                 f *= 1 + (w0 * sat_a[i0] + w1 * sat_a[i1]) / 100
                 L *= 1 + (w0 * lum_a[i0] + w1 * lum_a[i1]) / 100 * 0.3 * cw
             if eq_on and C > 1e-4:

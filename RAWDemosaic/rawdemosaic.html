@@ -3080,7 +3080,7 @@ function colourPass(px, n, p) {
             let u = d / span; u = u * u * (3 - 2 * u);
             const w0 = 1 - u, w1 = u, cw = Math.min(1, C / 0.06);
             const get = (arr, k) => (arr && arr[k]) || 0;
-            h += (w0 * get(hsl.hue, i0) + w1 * get(hsl.hue, i1)) / 100 * 30 * cw;
+            h += (w0 * get(hsl.hue, i0) + w1 * get(hsl.hue, i1)) / 100 * 180 * cw;   // ±100 = ±180°: the whole colour wheel
             f *= 1 + (w0 * get(hsl.sat, i0) + w1 * get(hsl.sat, i1)) / 100;
             L *= 1 + (w0 * get(hsl.lum, i0) + w1 * get(hsl.lum, i1)) / 100 * 0.3 * cw;
         }
@@ -6551,7 +6551,7 @@ function render(m) {
         for (const m of params.masks || []) for (const c of m.comps) if (c.type === 'fill') refs.add(c.ref);
         for (const r of refs) { const bm = dev.bitmaps.get(r); if (bm) bitmaps[r] = { w: bm.w, h: bm.h, frame: bm.frame, png: await bitmapToPng(bm) }; }
         if (params.outpaint) { const L = dev.opLayers.get(params.outpaint.id); if (!L) delete params.outpaint; }
-        return { app: 'RAWDemosaic', kind: 'develop-settings', version: 1, from: state.fileName, groups, params, bitmaps };
+        return { app: 'RAWDemosaic', kind: 'develop-settings', version: 3, from: state.fileName, groups, params, bitmaps };
     }
     async function applySettings(obj, groups) {
         if (!obj || obj.kind !== 'develop-settings') throw new Error('this is not a RAWDemosaic settings file');
@@ -6563,6 +6563,8 @@ function render(m) {
             const keys = GROUPS[g].keys.filter(k => obj.params[k] !== undefined);
             if (!keys.length) continue;
             for (const k of keys) dev.params[k] = JSON.parse(JSON.stringify(obj.params[k]));
+            const ver = obj.version || 1;   // the mixer's hue ±100 was ±30° (version 1), ±60° (version 2); now ±180°
+            if (keys.includes('hsl') && ver < 3) dev.params.hsl.hue = dev.params.hsl.hue.map(v => v * (ver < 2 ? 30 : 60) / 180);
             applied.push(GROUPS[g].label);
         }
         if (!applied.length) throw new Error('nothing to apply with the groups ticked');

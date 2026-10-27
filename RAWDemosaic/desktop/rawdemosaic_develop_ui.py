@@ -926,9 +926,9 @@ class DevelopTab:
         self.curve.draw(); self.render_history(); self.update_view_name()
 
     def mixer_colour(self, i, v):
-        """The colour band i goes to at slider value v, as Develop moves it (hue ±30°, chroma ×0…2, lightness ±30 %)."""
+        """The colour band i goes to at slider value v, as Develop moves it (hue ±180°, chroma ×0…2, lightness ±30 %)."""
         h, mode = V.BAND_HUES[i], self.mixer_mode.get()
-        if mode == 'Hue': return V.oklab_hex(0.7, 0.14, h + v * 0.3)
+        if mode == 'Hue': return V.oklab_hex(0.7, 0.14, h + v * 1.8)
         if mode == 'Saturation': return V.oklab_hex(0.7, 0.14 * (1 + v / 100), h)
         return V.oklab_hex(0.7 * (1 + v / 100 * 0.3), 0.14, h)
 
@@ -2459,7 +2459,7 @@ class DevelopTab:
             if it['kind'] == 'fill': refs.add(it['mask'])
         bitmaps = {r: dict(w=bm['w'], h=bm['h'], frame=bm['frame'], png=self.bitmap_png(bm)) for r in refs if (bm := self.bitmaps.get(r))}
         if params.get('outpaint') and params['outpaint']['id'] not in self.op_layers: params.pop('outpaint')
-        return dict(app='RAWDemosaic', kind='develop-settings', version=1, **{'from': self.info.get('name', '')}, groups=groups, params=params, bitmaps=bitmaps)
+        return dict(app='RAWDemosaic', kind='develop-settings', version=3, **{'from': self.info.get('name', '')}, groups=groups, params=params, bitmaps=bitmaps)
 
     def apply_settings(self, obj, groups):
         if not obj or obj.get('kind') != 'develop-settings': raise ValueError('this is not a RAWDemosaic settings file')
@@ -2472,6 +2472,9 @@ class DevelopTab:
             keys = [k for k in GROUPS[g][1] if k in obj['params']]
             if not keys: continue
             for k in keys: self.params[k] = copy.deepcopy(obj['params'][k])
+            ver = obj.get('version') or 1
+            if 'hsl' in keys and ver < 3:   # the mixer's hue ±100 was ±30° (version 1), ±60° (version 2); now ±180°
+                self.params['hsl']['hue'] = [v * (30 if ver < 2 else 60) / 180 for v in self.params['hsl']['hue']]
             applied.append(GROUPS[g][0])
         if not applied: raise ValueError('nothing to apply with the groups ticked')
         self.params.setdefault('outpaint', None)
