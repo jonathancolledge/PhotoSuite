@@ -1381,9 +1381,60 @@ def out_paths(src_path, out_dir, suffix=''):
     return os.path.join(d, stem)
 
 
-def process(src, columns, opts, models, job, quick=False):
+def unique_stem(stem, suffixes):
+    """stem, or stem_2, stem_3, ... so that no stem + suffix (e.g. '.tif', '_col1.tif') names an existing file."""
+    cand, n = stem, 1
+    while any(os.path.exists(cand + sfx) for sfx in suffixes):
+        n += 1; cand = f'{stem}_{n}'
+    return cand
+
+
+def output_suffixes(opts, n_columns=0):
+    """The files a run writes for one stem (for unique_stem)."""
+    sfx = ['.tif', '.jpg'] + [f'_col{i + 1}.tif' for i in range(n_columns)]
+    sr = opts.get('sr') or {}
+    if sr.get('save_each'):
+        sfx += [f'_sr_{os.path.splitext(os.path.basename(m.get("path", "")))[0]}{e}' for m in sr.get('models', []) for e in ('.tif', '.jpg')]
+    return sfx
+
+
+def quick_preview(src, max_side=1600):
+    """A small view of a RAW with no usable embedded preview, as the web app makes it: the mosaic is box-averaged
+    by a multiple of the pattern size (each output pixel keeps its CFA colour), then RCD-demosaiced (Bayer) or
+    each colour averaged over the block (X-Trans). Returns sRGB uint8 in display orientation."""
+    raw, P = src.raw, src.P
+    H, W = raw.shape
+    f = P * max(1, int(math.floor(max(W, H) / (max_side * P) + 0.5)))
+    w, h = W // f, H // f
+    if w < 16 or h < 16: raise ValueError('this image is too small for a quick preview')
+    block = raw[:h * f, :w * f].astype(np.float32).reshape(h, f, w, f)
+    pat = np.asarray(src.pattern).reshape(P, P)
+    wb = np.asarray(src.wb, np.float32)
+    if P == 2:
+        small = np.empty((h, w), np.float32)
+        for py in range(2):
+            for px in range(2):   # one sample of the output pixel's own colour from each block (f even keeps the phase)
+                small[py::2, px::2] = block[py::2, py::2][:, :, px::2, px::2].mean(axis=(1, 3))
+        mos = normalize_mosaic(small, src.pattern, 2, src.black, src.white)
+        wm = np.minimum(1, mos * wb[cfa_colour_map(src.pattern, 2, h, w)]).astype(np.float32)
+        cam = np.minimum(DM.demosaic_rcd(wm, src.pattern), 1)
+    else:
+        cfa = np.tile(pat, (f // P, f // P))
+        scale = 1 / (src.white - np.mean(src.black))
+        cam = np.empty((h, w, 3), np.float32)
+        for c in range(3):
+            m = (cfa == c).astype(np.float32)
+            cam[..., c] = np.maximum(0, np.einsum('yixj,ij->yx', block, m) / m.sum() - src.black[c]) * scale
+        cam = np.minimum(1, cam * wb)
+    apply_matrix(cam, cam_to_working(src.xyz_to_cam), out=cam)
+    np.maximum(cam, 0, out=cam)
+    return display_image(orient(cam, src.flip), 0)
+
+
+def process(src, columns, opts, models, job, quick=False, on_column=None):
     """Run every enabled column on a RawFile / ImageInput and blend them.
-    opts: blend_mode, out_space, save_columns, out_dir, jpeg, jpeg_quality, tiff, restore, sr.
+    opts: blend_mode, out_space, save_columns, out_dir, jpeg, jpeg_quality, tiff, restore, sr, unique.
+    on_column(index, column, display uint8, files) is called as each column finishes.
     Returns dict(blend=linear working (display orientation), columns=[(col, display uint8)], files=[...])."""
     t0 = time.time()
     is_xt = (not src.is_rgb) and src.is_xtrans
@@ -1405,6 +1456,8 @@ def process(src, columns, opts, models, job, quick=False):
             mosaic = normalize_mosaic(src_c.raw, src_c.pattern, src.P, src.black, src.white)
     images, out_cols, files = [], [], []
     stem = out_paths(src.path, opts.get('out_dir'), '_preview' if quick else '')
+    if not quick and opts.get('unique', True):   # never replace earlier results: name_2, name_3, ...
+        stem = unique_stem(stem, output_suffixes(opts, len(cols)))
     space = opts.get('out_space', 'srgb')
     keep = opts.get('blend_mode', 'mean') != 'mean'
     acc = None
@@ -1418,10 +1471,12 @@ def process(src, columns, opts, models, job, quick=False):
         flip = 0 if src.is_rgb else src.flip
         oriented = orient(work, flip)
         out_cols.append((col, display_image(oriented, 0)))   # full size, like the blend
+        col_files = []
         if opts.get('save_columns') and not quick:
             p = f'{stem}_col{ci + 1}.tif'
             write_tiff16(p, to_uint16(to_output(oriented, space)), space)
-            files.append(p); job.log('info', f'saved {os.path.basename(p)}')
+            files.append(p); col_files.append(p); job.log('info', f'saved {os.path.basename(p)}')
+        if on_column: on_column(ci, col, out_cols[-1][1], col_files)
         if keep:
             images.append(oriented)
         else:

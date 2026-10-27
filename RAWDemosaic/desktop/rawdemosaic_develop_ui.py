@@ -114,7 +114,7 @@ def frame_of(region, src_hw, flip, is_rgb):
 # ───────────────────────────────────────────── widgets
 class Slider:
     """Label (double-click resets) + scale + number box. on_change(live) while dragging, on_commit(label) at the end."""
-    def __init__(self, ui, parent, label, get, set_, lo, hi, step, dec=0, unit='', default=0, hist=None, swatch=None, title=''):
+    def __init__(self, ui, parent, label, get, set_, lo, hi, step, dec=0, unit='', default=0, hist=None, swatch=None, title='', bar=None):
         self.ui, self.get, self.set, self.lo, self.hi, self.step, self.dec, self.unit = ui, get, set_, lo, hi, step, dec, unit
         self.default, self.hist = default, hist or label
         C = ui.C
@@ -125,8 +125,18 @@ class Slider:
         self.lab = ttk.Label(row, text=label, style='Card.TLabel', width=15 if not swatch else 12)
         self.lab.pack(side='left')
         self.var = tk.DoubleVar(value=0)
-        self.scale = ttk.Scale(row, from_=lo, to=hi, variable=self.var, orient='horizontal', command=self._moved)
-        self.scale.pack(side='left', fill='x', expand=True, padx=4)
+        self.bar, self.barc = bar, None   # bar(v): the colour at value v, shown in a strip under the scale
+        sp = row
+        if bar:
+            sp = ttk.Frame(row, style='Card.TFrame'); sp.pack(side='left', fill='x', expand=True, padx=4)
+        self.scale = ttk.Scale(sp, from_=lo, to=hi, variable=self.var, orient='horizontal', command=self._moved)
+        if not bar:
+            self.scale.pack(side='left', fill='x', expand=True, padx=4)
+        else:
+            self.scale.pack(fill='x')
+            self.barc = tk.Canvas(sp, height=7, bg=C['card'], highlightthickness=0, bd=0)
+            self.barc.pack(fill='x')
+            self.barc.bind('<Configure>', lambda e: self.draw_bar())
         self.num = tk.StringVar()
         e = ttk.Entry(row, textvariable=self.num, width=7, justify='right')
         e.pack(side='left')
@@ -151,7 +161,7 @@ class Slider:
         v = self._q(self.var.get())
         if v == self.get(): return
         self.set(v); self._dragged = True
-        self.num.set(self.fmt(v)); self._style(v)
+        self.num.set(self.fmt(v)); self._style(v); self._mark()
         self.ui.changed(self)
 
     def _commit(self):
@@ -183,6 +193,35 @@ class Slider:
             self.var.set(v); self.num.set(self.fmt(v)); self._style(v)
         finally:
             self._loading = False
+        self.draw_bar()
+
+    def _bar_x(self, v):
+        """Canvas x of value v: where the scale puts its thumb centre (the trough ends are inset by half a thumb)."""
+        try:
+            a, b = self.scale.coords(self.lo)[0], self.scale.coords(self.hi)[0]
+        except Exception:
+            a, b = 0, 0
+        w = self.barc.winfo_width()
+        if b - a < 4: a, b = 8, w - 8
+        return a + (b - a) * (v - self.lo) / (self.hi - self.lo)
+
+    def draw_bar(self):
+        cv = self.barc
+        if cv is None or cv.winfo_width() < 10: return
+        cv.delete('all')
+        n = 48
+        for i in range(n):
+            v0 = self.lo + (self.hi - self.lo) * i / n; v1 = self.lo + (self.hi - self.lo) * (i + 1) / n
+            x0, x1 = self._bar_x(v0), self._bar_x(v1)
+            cv.create_rectangle(x0, 1, x1 + 1, 7, fill=self.bar((v0 + v1) / 2), outline='')
+        cv.create_polygon(0, 0, 0, 0, 0, 0, fill=self.ui.C['text'], outline=self.ui.C['card'], tags='mk')
+        self._mark()
+
+    def _mark(self):
+        if self.barc is None: return
+        v = self.get() if self.ui.params is not None else self.default
+        x = self._bar_x(v)
+        self.barc.coords('mk', x - 4, 0, x + 4, 0, x, 6)
 
 
 class Section:
@@ -454,7 +493,7 @@ class DevelopTab:
             mk = lambda i=i: {'Hue': 'hue', 'Saturation': 'sat', 'Luminance': 'lum'}[self.mixer_mode.get()]
             self.mixer.append(self.slider(s.body, b, None, -100, 100, 1, get=lambda i=i, mk=mk: self.params['hsl'][mk()][i],
                                           set_=lambda v, i=i, mk=mk: self.params['hsl'][mk()].__setitem__(i, v), swatch=V.oklab_hex(0.7, 0.14, V.BAND_HUES[i]),
-                                          hist=None, histf=lambda i=i: f'{self.mixer_mode.get()}: {V.BAND_NAMES[i]}'))
+                                          hist=None, histf=lambda i=i: f'{self.mixer_mode.get()}: {V.BAND_NAMES[i]}', bar=lambda v, i=i: self.mixer_colour(i, v)))
         s = self.sec(left, 'grading', 'Colour grading', key='grading')
         for k, l in (('shadows', 'Shadows'), ('midtones', 'Midtones'), ('highlights', 'Highlights')):
             self.slider(s.body, f'{l} hue', ['grading', k, 'hue'], 0, 360, 1, unit='°')
@@ -589,11 +628,11 @@ class DevelopTab:
         self.sections[name] = s
         return s
 
-    def slider(self, parent, label, path, lo, hi, step, dec=0, unit='', hist=None, get=None, set_=None, swatch=None, title='', histf=None):
+    def slider(self, parent, label, path, lo, hi, step, dec=0, unit='', hist=None, get=None, set_=None, swatch=None, title='', histf=None, bar=None):
         g = get or (lambda: get_p(path, self.params))
         st = set_ or (lambda v: set_p(path, v, self.params))
         default = 0 if get else get_p(path, DEFAULTS)
-        s = Slider(self, parent, label, g, st, lo, hi, step, dec, unit, default, hist, swatch, title)
+        s = Slider(self, parent, label, g, st, lo, hi, step, dec, unit, default, hist, swatch, title, bar)
         s.path = path
         s.histf = histf
         self.sliders.append(s)
@@ -885,6 +924,13 @@ class DevelopTab:
         self.keep_empty.set(bool(p['geometry'].get('keepEmpty')))
         self._sync_mixer(); self.render_mask_ui(); self.render_spot_ui(); self.render_outpaint_ui(); self.render_lens_ui(); self.show_brush_size()
         self.curve.draw(); self.render_history(); self.update_view_name()
+
+    def mixer_colour(self, i, v):
+        """The colour band i goes to at slider value v, as Develop moves it (hue ±30°, chroma ×0…2, lightness ±30 %)."""
+        h, mode = V.BAND_HUES[i], self.mixer_mode.get()
+        if mode == 'Hue': return V.oklab_hex(0.7, 0.14, h + v * 0.3)
+        if mode == 'Saturation': return V.oklab_hex(0.7, 0.14 * (1 + v / 100), h)
+        return V.oklab_hex(0.7 * (1 + v / 100 * 0.3), 0.14, h)
 
     def _sync_mixer(self):
         for s in self.mixer: s.sync()
@@ -1573,11 +1619,42 @@ class DevelopTab:
             if self._last_line: cv.create_line(*self._last_line, fill=C['warn'], width=2, tags='ov')
 
     # ─── tools
+    def view_to_src(self, kind, x, y):
+        """A point of the source or final view (view pixels) -> source position (0…1), or None."""
+        CW, CH = self.canvas_dims()
+        if kind == 'source': return self.c2s(x / CW, y / CH)
+        g = self.params['geometry']; c = g['crop']
+        P = V.map_points(dict(rot90=g['rot90'], angle=g['angle'], Hinv=self.hinv(g)), self.lens_params(), self.img_w, self.img_h, 1.0,
+                         [(c['x'] * CW + x - CW / 2, c['y'] * CH + y - CH / 2)])
+        if np.isnan(P).any(): return None
+        return P[0, 0] / self.img_w, P[0, 1] / self.img_h
+
+    def src_to_view(self, kind, sx, sy):
+        """Source position (0…1) -> point of the source or final view (view pixels), or None."""
+        CW, CH = self.canvas_dims()
+        if kind == 'source':
+            u, v = self.s2c(sx, sy); return u * CW, v * CH
+        g = self.params['geometry']; c = g['crop']
+        a = V._geo_args(dict(rot90=g['rot90'], angle=g['angle'], Hinv=self.hinv(g)), self.lens_params(), self.img_w, self.img_h, 1.0)
+        TW, TH = self.full_dims()
+        qx, qy, _ = V._locate(sx * self.img_w - 0.5, sy * self.img_h - 0.5, TW, TH, max(4, int(min(TW, TH) / 200)),
+                              c['x'] * a[0], c['y'] * a[1], 1.0, *a[2:], a[0], a[1], self.img_w, self.img_h)
+        return None if not np.isfinite(qx) else (qx + 0.5, qy + 0.5)
+
     def set_tool(self, t):
         if not self.ready(): return
         if self.tool == 'crop' and t != 'crop': self.end_crop(True, from_set_tool=True)
         if self.tool == 'guides' and t != 'guides': self.end_guides(True, from_set_tool=True)
+        k0 = self.view_kind()
         self.tool = t; self._last_line = None
+        k1 = self.view_kind()
+        if self.zoom != 'fit' and k0 != k1 and {k0, k1} == {'source', 'final'}:   # zoomed in: stay on the same place
+            try:
+                q = self.view_to_src(k0, self.cx, self.cy)
+                q = q and self.src_to_view(k1, *q)
+                if q: self.cx, self.cy = q; self.clamp_center()
+            except Exception:
+                traceback.print_exc()
         if t in ('crop', 'guides'):
             self.tool_snap = json.dumps(self.params)
             self.zoom = 'fit'; self.zoom_var.set(0); self.zoom_lbl.configure(text='Fit')
@@ -2464,6 +2541,7 @@ class DevelopTab:
         d = opts['out_dir'] or os.path.dirname(stem0)
         base = os.path.basename(stem0) + '_developed'
         ext = '.tif' if kind == 'tiff' else '.jpg'
+        if opts.get('unique', True): base = os.path.basename(E.unique_stem(os.path.join(d, base), (ext,)))
         p = filedialog.asksaveasfilename(defaultextension=ext, initialdir=d, initialfile=base + ext,
                                          filetypes=[('TIFF 16-bit', '*.tif')] if kind == 'tiff' else [('JPEG', '*.jpg')], title='Save the developed image')
         if not p: return

@@ -282,7 +282,7 @@ class App:
         sr_models = [dict(model=m, weight=w) for m, w in self.sr_rows]
         return dict(space=key_of([(k, E.SPACES[k]['label']) for k in E.OUTPUT_SPACES], self.out_space.get(), 'srgb'),
                     tiff=self.save_tiff.get(), jpeg=self.save_jpeg.get(), jpeg_quality=int(self.jpeg_q.get()),
-                    save_columns=self.save_cols.get(), out_dir=self.out_dir.get().strip(),
+                    save_columns=self.save_cols.get(), unique=self.unique.get(), out_dir=self.out_dir.get().strip(),
                     restore=list(self.restore_chain), sr=dict(enabled=self.sr_on.get(), target=key_of(SR_TARGETS, self.sr_target.get(), '2'), save_each=self.sr_each.get(),
                                                               downscale=key_of(DOWNSCALE, self.sr_down.get(), 'lanczos'), models=sr_models))
 
@@ -645,6 +645,9 @@ class App:
         self.save_cols = tk.BooleanVar(value=o.get('save_columns', True))
         ttk.Checkbutton(c, text='Also save a 16-bit TIFF of each column (…_col1.tif …), for re-blending later',
                         variable=self.save_cols, style='Card.TCheckbutton').pack(anchor='w')
+        self.unique = tk.BooleanVar(value=o.get('unique', True))
+        ttk.Checkbutton(c, text='Never replace existing files: add _2, _3 … to the name instead',
+                        variable=self.unique, style='Card.TCheckbutton').pack(anchor='w')
         r = ttk.Frame(c, style='Card.TFrame'); r.pack(fill='x', pady=(6, 0))
         ttk.Label(r, text='Output folder', style='Card.TLabel', width=14).pack(side='left')
         self.out_dir = tk.StringVar(value=o.get('out_dir', ''))
@@ -900,18 +903,28 @@ class App:
                 rows = src.summary()
                 txt = '\n'.join(f'{k}: {v}' for k, v in rows if v) + ''.join('\n⚠ ' + w for w in src.warnings)
                 thumb = src.rgb if src.is_rgb else src.thumbnail()
+                kind = 'embedded preview'
                 if src.is_rgb: thumb = E.display_image(thumb, 2400)
-                self.q.put(('call', self._show_file_info, path, txt, thumb))
+                elif thumb is None:   # no usable embedded preview: a quick RCD of the mosaic, as the web app does
+                    self.q.put(('call', self._show_file_info, path, txt + '\nNo embedded preview: making a quick RCD preview…', None))
+                    thumb = E.quick_preview(src); kind = 'quick RCD preview'
+                self.q.put(('call', self._show_file_info, path, txt, thumb, kind))
             except Exception as ex:
                 self.q.put(('call', self._show_file_info, path, f'Could not read this file: {ex}', None))
         threading.Thread(target=work, daemon=True).start()
 
-    def _show_file_info(self, path, txt, thumb):
+    def _show_blend_preview(self, img, label):
+        if self.busy: return
+        v = self.bl_view   # same size (give or take a pixel): keep the zoom and position, as for results
+        same = v.img is not None and all(abs(a - b) <= 2 for a, b in zip(v.img.shape[:2], img.shape[:2]))
+        v.set_image(img, label, keep_view=same)
+
+    def _show_file_info(self, path, txt, thumb, kind='embedded preview'):
         sel = self.file_list.curselection()
         if not sel or self.files[sel[0]] != path: return
         self.file_info.configure(text=txt)
         if thumb is not None and not self.busy:
-            self.view.set_image(thumb, f'{os.path.basename(path)} — embedded preview' if not path.lower().endswith(E.IMAGE_EXTS) else os.path.basename(path))
+            self.view.set_image(thumb, f'{os.path.basename(path)} — {kind}' if not path.lower().endswith(E.IMAGE_EXTS) else os.path.basename(path))
 
     _src_lock = threading.Lock()
 
@@ -1091,34 +1104,47 @@ class App:
                 for w in src.warnings: job.log('warn', f'{name}: {w}')
                 sub = E.Job(log=job.log, progress=lambda f, t=None, k=k: job.progress((k + max(0, min(1, f))) / len(paths), f'{name}: {t}' if t else None))
                 sub.cancel_event = job.cancel_event
-                res = E.process(src, columns, opts, self.models, sub, quick=quick)
-                big = E.display_image(res['blend'], 0 if (k == len(paths) - 1) else 2400)
                 last = k == len(paths) - 1
+                self.q.put(('call', self._begin_file_results))
+
+                def on_column(ci, col, img, cfiles, name=name, last=last, p=p):
+                    size = (img.shape[1], img.shape[0])
+                    if not last:   # earlier files: a reduced copy keeps RAM in check
+                        f = max(1, -(-max(img.shape[:2]) // 2400)); img = np.ascontiguousarray(img[::f, ::f])
+                    self.q.put(('call', self._add_column_result, name, ci, col['name'], img, cfiles, quick, p, size))
+                res = E.process(src, columns, opts, self.models, sub, quick=quick, on_column=on_column)
+                big = E.display_image(res['blend'], 0 if last else 2400)
                 size = (res['blend'].shape[1], res['blend'].shape[0])
-                cols = [(c['name'], img if last else img[::max(1, -(-max(img.shape[:2]) // 2400))][:, ::max(1, -(-max(img.shape[:2]) // 2400))])
-                        for c, img in res['columns']]
                 if k == len(paths) - 1:
                     self.q.put(('call', self._to_develop, p, res, src, quick))
                 job.log('ok', f'{name}: {"preview" if quick else "done"} in {res["seconds"]:.1f} s' + (f' → {", ".join(os.path.basename(f) for f in res["files"])}' if res['files'] else ''))
-                self.q.put(('call', self._add_file_results, name, big, cols, res['files'], quick, p, size))
+                self.q.put(('call', self._add_file_results, name, big, res['files'], quick, p, size))
                 res = None
                 done.append(p)
             return done
         self.run_task('Quick preview' if quick else f'Processing {len(paths)} file{"s" if len(paths) > 1 else ""}', work)
 
-    def _add_file_results(self, name, big, cols, files, quick, src=None, size=None):
+    def _begin_file_results(self):
+        self._run_start = len(self.results)   # where this file's blend goes, above its columns
+
+    def _add_column_result(self, name, i, cname, img, files, quick, src, size):
         tag = ' (quick preview)' if quick else ''
-        start = len(self.results)
-        self.results.append(Result(f'{name}{tag} — blend', big, [f for f in files if '_col' not in os.path.basename(f)], src=src, quick=quick, size=size))
-        for i, (cname, img) in enumerate(cols):
-            self.results.append(Result(f'{name}{tag} — column {i + 1}: {cname}', img, [f for f in files if f.endswith(f'_col{i + 1}.tif')], src=src, kind='column', quick=quick, size=size))
-        self.session_tiffs += [f for f in files if '_col' in os.path.basename(f) and f.endswith('.tif')]
-        for r in self.results[start:]: self.result_list.insert('end', r.label())
+        self.results.append(Result(f'{name}{tag} — column {i + 1}: {cname}', img, files, src=src, kind='column', quick=quick, size=size))
+        self.session_tiffs += [f for f in files if f.endswith('.tif')]
+        self.result_list.insert('end', self.results[-1].label())
+        self.result_list.selection_clear(0, 'end'); self.result_list.selection_set('end'); self.result_list.see('end')
+        self._show_selected_result(keep_view=True)
+
+    def _add_file_results(self, name, big, files, quick, src=None, size=None):
+        tag = ' (quick preview)' if quick else ''
+        start = min(getattr(self, '_run_start', len(self.results)), len(self.results))
+        self.results.insert(start, Result(f'{name}{tag} — blend', big, [f for f in files if '_col' not in os.path.basename(f)], src=src, quick=quick, size=size))
+        self.result_list.insert(start, self.results[start].label())
         # keep RAM in check: older blends' full-size display copies are reduced
         for r in self.results[:start]:
             if r.img.shape[0] * r.img.shape[1] > 6e6:
                 f = int(np.ceil(max(r.img.shape[:2]) / 2400)); r.img = np.ascontiguousarray(r.img[::f, ::f])
-        self.result_list.selection_clear(0, 'end'); self.result_list.selection_set(start); self.result_list.see('end')
+        self.result_list.selection_clear(0, 'end'); self.result_list.selection_set(start); self.result_list.see(start)
         self._show_selected_result(keep_view=True)
 
     # ─── to Develop
@@ -1247,7 +1273,7 @@ class App:
         def work():
             try:
                 rgb, info = E.load_for_blend(p)
-                self.q.put(('call', lambda: (not self.busy) and self.bl_view.set_image(E.display_image(rgb, 2400), f'{os.path.basename(p)} — {info["profile"]}')))
+                self.q.put(('call', self._show_blend_preview, E.display_image(rgb, 2400), f'{os.path.basename(p)} — {info["profile"]}'))
             except Exception as ex:
                 self.q.put(('log', 'err', f'{os.path.basename(p)}: {ex}'))
         threading.Thread(target=work, daemon=True).start()
@@ -1321,7 +1347,9 @@ class App:
         stem0 = os.path.splitext(os.path.basename(first))[0]
         stem0 = stem0.split('_col')[0] if '_col' in stem0 else stem0
         out_stem = os.path.join(opts['out_dir'] or os.path.dirname(first), name or stem0 + '_blend')
-        if any(os.path.exists(out_stem + e) for e in ('.tif', '.jpg')) and not messagebox.askyesno(APP, f'{os.path.basename(out_stem)}.tif/.jpg exists. Replace it?'):
+        if opts.get('unique', True):
+            out_stem = E.unique_stem(out_stem, E.output_suffixes(opts))
+        elif any(os.path.exists(out_stem + e) for e in ('.tif', '.jpg')) and not messagebox.askyesno(APP, f'{os.path.basename(out_stem)}.tif/.jpg exists. Replace it?'):
             return
         mcfg = copy.deepcopy(self.mask_cfg) if self.mask_cfg else None
         self.settings['blend_name'] = name
