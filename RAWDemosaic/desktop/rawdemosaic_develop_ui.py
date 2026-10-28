@@ -52,6 +52,7 @@ SV_TOOLS = ('guides', 'spot', 'brush', 'sam', 'lasso', 'mlasso', 'poly', 'rect',
 RETOUCH_TOOLS = ('spot', 'brush', 'sam', 'lasso', 'mlasso', 'poly', 'rect', 'grad', 'fill')
 MASK_TOOLS = ('brush', 'lasso', 'mlasso', 'poly', 'rect', 'grad', 'sam', 'fill')
 LASSOS = ('lasso', 'mlasso', 'poly')
+TONE_RANGE = {k: (-200, 200) for k in ('highlights', 'shadows', 'midtones')}   # wider than the other sliders; the same strength per step
 GROUPS = {
     'tone': ('Light & white balance', ['temp', 'tint', 'exposure', 'contrast', 'highlights', 'shadows', 'midtones', 'whites', 'blacks', 'brightness'], True),
     'presence': ('Presence', ['dehaze', 'vibrance', 'saturation', 'clarity', 'localContrast', 'micro'], True),
@@ -867,8 +868,8 @@ class DevelopTab:
         self.slider(self.mask_body, 'Mask feather', None, 0, 300, 1, unit=' px', hist='Mask feather',
                     get=lambda: (self.cur_mask() or {}).get('feather', 0) or 0, set_=lambda v: self.cur_mask() and self.cur_mask().__setitem__('feather', v))
         ttk.Label(self.mask_body, text='Adjust inside the mask', style='Sub.TLabel').pack(anchor='w', pady=(4, 0))
-        for k, l, lo, hi, st, dec in (('exposure', 'Exposure', -4, 4, 0.01, 2), ('contrast', 'Contrast', -100, 100, 1, 0), ('highlights', 'Highlights', -100, 100, 1, 0),
-                                      ('shadows', 'Shadows', -100, 100, 1, 0), ('midtones', 'Midtones', -100, 100, 1, 0), ('whites', 'Whites', -100, 100, 1, 0),
+        for k, l, lo, hi, st, dec in (('exposure', 'Exposure', -4, 4, 0.01, 2), ('contrast', 'Contrast', -100, 100, 1, 0), ('highlights', 'Highlights', *TONE_RANGE['highlights'], 1, 0),
+                                      ('shadows', 'Shadows', *TONE_RANGE['shadows'], 1, 0), ('midtones', 'Midtones', *TONE_RANGE['midtones'], 1, 0), ('whites', 'Whites', -100, 100, 1, 0),
                                       ('blacks', 'Blacks', -100, 100, 1, 0), ('temp', 'Temperature', -200, 200, 1, 0), ('tint', 'Tint', -150, 150, 1, 0),
                                       ('saturation', 'Saturation', -100, 100, 1, 0), ('clarity', 'Clarity', -100, 100, 1, 0), ('dehaze', 'Dehaze', -100, 100, 1, 0),
                                       ('micro', 'Texture', -100, 100, 1, 0), ('sharpness', 'Sharpness', -100, 200, 1, 0)):
@@ -904,7 +905,7 @@ class DevelopTab:
         self.slider(s.body, 'Exposure', ['exposure'], -5, 5, 0.01, dec=2, unit=' EV')
         for k, l in (('contrast', 'Contrast'), ('highlights', 'Highlights'), ('shadows', 'Shadows'), ('midtones', 'Midtones'), ('whites', 'Whites'),
                      ('blacks', 'Blacks'), ('brightness', 'Brightness')):
-            self.slider(s.body, l, [k], -100, 100, 1)
+            self.slider(s.body, l, [k], *TONE_RANGE.get(k, (-100, 100)), 1)
 
     def _build_presence(self, left):
         s = self.sec(left, 'presence', 'Presence & detail', key='presence', open_=True)

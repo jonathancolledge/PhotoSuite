@@ -4782,6 +4782,7 @@ function render(m) {
         s.row.classList.toggle('changed', v !== (s.spec.get ? 0 : getP(s.path, DEV_DEFAULTS)));
     }
     const PM = (label, extra) => Object.assign({ label, min: -100, max: 100, step: 1 }, extra);
+    const TONE_RANGE = { highlights: { min: -200, max: 200 }, shadows: { min: -200, max: 200 }, midtones: { min: -200, max: 200 } };   // wider than the other sliders; the same strength per step
     function buildDevelopControls() {
         makeSlider($('sl-angle'), ['geometry', 'angle'], { label: 'Angle', min: -45, max: 45, step: 0.05, dec: 2, unit: '°', title: 'Positive turns the picture clockwise' });
         const basic = $('sec-basic');
@@ -4797,7 +4798,7 @@ function render(m) {
             ['shadows', 'Shadows', 'Lifts (right) or deepens dark areas, following the local brightness'],
             ['midtones', 'Midtones', 'Brightens (right) or darkens the middle tones, following the local brightness, leaving deep shadows and bright highlights'], ['whites', 'Whites', 'Moves the white point'],
             ['blacks', 'Blacks', 'Moves the black point'], ['brightness', 'Brightness', 'Mid-tone brightness (a gamma), keeping black and white']])
-            makeSlider(basic, [k], PM(l, { title: t }));
+            makeSlider(basic, [k], PM(l, Object.assign({ title: t }, TONE_RANGE[k])));
         const pres = $('sec-presence');
         for (const [k, l, t] of [['dehaze', 'Dehaze', 'Removes (right) or adds haze (dark-channel prior)'], ['vibrance', 'Vibrance', 'Saturation that favours muted colours'],
             ['saturation', 'Saturation', 'Global saturation (OkLab chroma)'], ['clarity', 'Clarity', 'Mid-tone local contrast at a medium radius'],
@@ -4824,7 +4825,7 @@ function render(m) {
         makeSlider(shp, ['masks'], { label: 'Mask feather', hist: 'Mask feather', min: 0, max: 300, step: 1, unit: ' px', local: true, title: 'Softens the edge of the whole mask over this many pixels',
             get: () => { const m = selMask(); return m && m.feather || 0; }, set: v => { const m = selMask(); if (m) m.feather = v; } });
         const loc = $('sl-local');
-        for (const [k, l, min, max, step, dec] of [['exposure', 'Exposure', -4, 4, 0.01, 2], ['contrast', 'Contrast'], ['highlights', 'Highlights'], ['shadows', 'Shadows'], ['midtones', 'Midtones'], ['whites', 'Whites'], ['blacks', 'Blacks'],
+        for (const [k, l, min, max, step, dec] of [['exposure', 'Exposure', -4, 4, 0.01, 2], ['contrast', 'Contrast'], ['highlights', 'Highlights', -200, 200], ['shadows', 'Shadows', -200, 200], ['midtones', 'Midtones', -200, 200], ['whites', 'Whites'], ['blacks', 'Blacks'],
             ['temp', 'Temperature', -200, 200], ['tint', 'Tint', -150, 150], ['saturation', 'Saturation'], ['clarity', 'Clarity'], ['dehaze', 'Dehaze'], ['micro', 'Texture'], ['sharpness', 'Sharpness', -100, 200]])
             makeSlider(loc, ['masks'], { label: l, hist: 'Mask ' + l.toLowerCase(), min: min ?? -100, max: max ?? 100, step: step || 1, dec: dec || 0, local: true,
                 get: () => { const m = selMask(); return m && m.adj[k] || 0; }, set: v => { const m = selMask(); if (m) m.adj[k] = v; } });
