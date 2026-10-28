@@ -1530,6 +1530,13 @@ def draw_comp(c, W, H, frame, frame_diag, img_w, bitmaps):
         pts = np.array([px(*q) for q in c['pts']]) * (1 << SH)
         cv2.fillPoly(A, [np.round(pts).astype(np.int32)], 255, cv2.LINE_AA, SH)
         return A.astype(np.float32) / 255, 0
+    if c['type'] == 'grad':   # linear gradient: full beyond a, none beyond b, smooth between; its edges are perpendicular to a -> b
+        (ax, ay), (bx, by) = px(*c['a']), px(*c['b'])
+        dx, dy = bx - ax, by - ay; L2 = dx * dx + dy * dy
+        if L2 < 1e-6: return A.astype(np.float32), 0
+        t = np.clip(((np.arange(H, dtype=np.float32) + 0.5 - ay) * (dy / L2))[:, None] +
+                    ((np.arange(W, dtype=np.float32) + 0.5 - ax) * (dx / L2))[None, :], 0, 1)
+        return (1 - t * t * (3 - 2 * t)).astype(np.float32), 0
     if c['type'] in ('sam', 'fill'):
         bm = bitmaps.get(c['ref'])
         if bm is None: return A.astype(np.float32), 0

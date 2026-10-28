@@ -41,12 +41,17 @@ TOOL_HINTS = {
     'fill': 'Click an area to select everything of a similar colour joined to it. Erase mode or Alt subtracts. Esc finishes.',
     'lasso': 'Drag round the area to select (hold Alt to subtract). Middle-drag pans; Esc finishes.',
     'mlasso': 'Click along the edge of the area: the outline snaps to edges. Click the first point, double-click or Enter closes (Alt subtracts); Backspace removes the last point; Esc cancels.',
+    'poly': 'Click the corners of the area (straight sides). Click the first point, double-click or Enter closes (Alt subtracts); Backspace removes the last point; Esc cancels.',
+    'rect': 'Drag a rectangle over the area (hold Alt to subtract). Middle-drag pans; Esc finishes.',
+    'grad': 'Drag from where the adjustment is full to where it fades out. Drag the end circles to change angle and feather, the middle circle to move, '
+            'the centre line to rotate, an outer line to change the feather. Delete or double-click the middle removes it. Esc finishes.',
     'sam': 'Click the object to select it; right-click (or Alt-click) excludes; drag for a box; Shift-click starts another selection. Esc finishes.',
     'guides': 'Drag along an edge to draw a guide (up to four), drag an end to adjust it, double-click a guide to delete it. Enter (or Done) applies; Esc cancels.',
 }
-SV_TOOLS = ('guides', 'spot', 'brush', 'sam', 'lasso', 'mlasso', 'fill')   # shown on the uncorrected picture
-RETOUCH_TOOLS = ('spot', 'brush', 'sam', 'lasso', 'mlasso', 'fill')
-MASK_TOOLS = ('brush', 'lasso', 'mlasso', 'sam', 'fill')
+SV_TOOLS = ('guides', 'spot', 'brush', 'sam', 'lasso', 'mlasso', 'poly', 'rect', 'grad', 'fill')   # shown on the uncorrected picture
+RETOUCH_TOOLS = ('spot', 'brush', 'sam', 'lasso', 'mlasso', 'poly', 'rect', 'grad', 'fill')
+MASK_TOOLS = ('brush', 'lasso', 'mlasso', 'poly', 'rect', 'grad', 'sam', 'fill')
+LASSOS = ('lasso', 'mlasso', 'poly')
 GROUPS = {
     'tone': ('Light & white balance', ['temp', 'tint', 'exposure', 'contrast', 'highlights', 'shadows', 'midtones', 'whites', 'blacks', 'brightness'], True),
     'presence': ('Presence', ['dehaze', 'vibrance', 'saturation', 'clarity', 'localContrast', 'micro'], True),
@@ -406,7 +411,7 @@ class DevelopTab:
         self.bitmaps, self.fills, self.op_layers, self.rasters = {}, {}, {}, {}
         self.sel_mask = None; self.sel_spot = -1; self.tool = None; self.tool_snap = None
         self.brush = dict(size=0.03, feather=0.5, flow=1.0, erase=False); self.spot = dict(size=0.012, feather=0.4, mode='heal')
-        self.show_overlay = False; self.sam = None; self.sam_prompt = None; self.lasso = None; self.lw = None; self.snap = None
+        self.show_overlay = False; self.sam = None; self.sam_prompt = None; self.lasso = None; self.lw = None; self.snap = None; self.grad_sel = None
         self.zoom = 'fit'; self.z = 1.0; self.cx = self.cy = 0.0; self.before = False; self.space = False
         self.hist = None; self.lens_db = None; self.camera = None; self.lens_cands = []
         self.sliders = []; self.sections = {}; self.clip = None
@@ -826,7 +831,9 @@ class DevelopTab:
         self.btn(r, 'New', self.new_mask_cmd); self.btn(r, 'Delete', self.delete_mask)
         r = self.row(b)
         self.tool_btns = {}
-        for k, l in (('brush', 'Brush'), ('erase', 'Erase'), ('sam', 'Select (SAM2)'), ('lasso', 'Lasso'), ('mlasso', 'Magnetic'), ('fill', 'Fill')):
+        for k, l in (('brush', 'Brush'), ('erase', 'Erase'), ('sam', 'Select (SAM2)'), ('fill', 'Fill'), (None, None),
+                     ('lasso', 'Lasso'), ('mlasso', 'Magnetic'), ('poly', 'Polygon'), ('rect', 'Rectangle'), ('grad', 'Gradient')):
+            if k is None: r = self.row(b); continue
             self.tool_btns[k] = self.btn(r, l, lambda k=k: self.mask_tool(k))
         r = self.row(b)
         self.overlay_var = tk.BooleanVar()
@@ -839,7 +846,7 @@ class DevelopTab:
             sl = Slider(self, b, lab, lambda key=key, f=f: self.brush[key] * f, lambda v, key=key, f=f: self.brush.__setitem__(key, v / f), lo, hi, st, 0, '', 0, lab)
             self._tool_only(sl)
         self.fill_tol = tk.IntVar(value=12); self.lasso_feather = tk.DoubleVar(value=2)
-        for lab, var, lo, hi in (('Fill tolerance', self.fill_tol, 0, 100), ('Lasso feather px', self.lasso_feather, 0, 60)):
+        for lab, var, lo, hi in (('Fill tolerance', self.fill_tol, 0, 100), ('Edge feather px', self.lasso_feather, 0, 60)):
             r = self.row(b); ttk.Label(r, text=lab, style='Card.TLabel', width=15).pack(side='left')
             ttk.Scale(r, from_=lo, to=hi, variable=var, orient='horizontal').pack(side='left', fill='x', expand=True, padx=4)
             ttk.Label(r, textvariable=var, style='Card.TLabel', width=5).pack(side='left')
@@ -852,6 +859,7 @@ class DevelopTab:
         ttk.Checkbutton(r, text='Invert', variable=self.mask_invert, style='Card.TCheckbutton', command=self.invert_mask).pack(side='left')
         ttk.Label(self.mask_body, text='Parts of this mask', style='Sub.TLabel').pack(anchor='w', pady=(4, 0))
         self.parts = self.app._scrolled_listbox(self.mask_body, 4)
+        self.parts.bind('<<ListboxSelect>>', lambda e: self.part_picked())
         r = self.row(self.mask_body)
         self.btn(r, 'Add / subtract', self.part_toggle); self.btn(r, 'Edit points', self.part_edit); self.btn(r, 'Delete part', self.part_delete)
         self.slider(self.mask_body, 'Grow / shrink', None, -300, 300, 1, unit=' px', hist='Mask grow/shrink',
@@ -1554,7 +1562,7 @@ class DevelopTab:
 
     def _mask_visible(self):
         m = self.cur_mask()
-        return bool(m and m['comps'] and (self.show_overlay or self.tool in ('brush', 'sam')))
+        return bool(m and m['comps'] and (self.show_overlay or self.tool in ('brush', 'sam', 'grad')))
 
     def _source_overlay(self, img, s, pos):
         """The selected mask's raster over the uncorrected (rot90 only) view."""
@@ -1673,14 +1681,21 @@ class DevelopTab:
                 cv.create_line(tx, ty, sx, sy, fill='#fff', dash=(3, 3), tags='ov')
                 cv.create_oval(sx - R, sy - R, sx + R, sy + R, outline=C['info'], width=1, dash=(4, 3), tags='ov')
                 cv.create_oval(tx - R, ty - R, tx + R, ty + R, outline=C['accent'] if i == self.sel_spot else '#fff', width=2, tags='ov')
-        if t in ('lasso', 'mlasso') and self.lasso:
+        if t in LASSOS and self.lasso:
             pts = self.lasso['pts'] + self.lasso.get('preview', [])
             if len(pts) > 1:
                 step = max(1, len(pts) // 3000)
                 cv.create_line(*[c for u, v in pts[::step] + [pts[-1]] for c in P(u, v)], fill=C['warn'], width=2, tags='ov')
-            if self.lasso.get('magnetic'):
+            if self.lasso.get('polygon') and len(pts) > 2:
+                cv.create_line(*P(*pts[-1]), *P(*pts[0]), fill=C['warn'], dash=(3, 3), tags='ov')
+            if self.lasso.get('magnetic') or self.lasso.get('polygon'):
                 for i in self.lasso['anchors']:
                     X, Y = P(*self.lasso['pts'][i]); cv.create_rectangle(X - 3, Y - 3, X + 3, Y + 3, fill=C['warn'], outline='#000', tags='ov')
+        if t == 'rect' and self._drag and self._drag.get('kind') == 'rect':
+            (a, b), (c, d) = P(*self._drag['p']), P(*self._drag['cur'])
+            cv.create_rectangle(a, b, c, d, outline=C['warn'], width=2, tags='ov')
+        if t == 'grad':
+            self.draw_grads()
         if t in ('brush', 'spot') and getattr(self, 'cursor', None):
             X, Y = self.cursor
             R = (self.brush['size'] if t == 'brush' else self.spot['size']) * W / self.view_dims()[0] * self.frame_diag
@@ -1751,15 +1766,16 @@ class DevelopTab:
         if t != 'sam' and self.sam_prompt is not None:
             if self.sam_prompt.get('comp') is not None: self.commit('SAM2 selection')
             self.sam_prompt = None
-        if t not in ('lasso', 'mlasso'): self.lasso = None
+        if t not in LASSOS: self.lasso = None
         if t == 'mlasso': self.lasso_prepare()
+        if t == 'grad': self.grad_sel = next((c for c in reversed((self.cur_mask() or {}).get('comps', [])) if c['type'] == 'grad'), None)
         self.spots_btn.configure(text='Done' if t == 'spot' else 'Spots…')
         self.crop_btn.configure(text='Done' if t == 'crop' else 'Crop…')
         self.guides_btn.configure(text='Done' if t == 'guides' else 'Guides…')
         for b, on in ((self.straighten_btn, t == 'straighten'), (self.wb_btn, t == 'wb')):
             b.configure(style='Accent.TButton' if on else 'Small.TButton')
         self.hint.configure(text=(TOOL_HINTS.get(t, '') + (' ' + self.guides_summary() if t == 'guides' else '')) if t else '')
-        self.cv.configure(cursor='crosshair' if t in ('straighten', 'wb', 'sam', 'spot', 'brush', 'lasso', 'mlasso', 'fill', 'guides') else 'arrow')
+        self.cv.configure(cursor='crosshair' if t in ('straighten', 'wb', 'sam', 'spot', 'brush', 'lasso', 'mlasso', 'poly', 'rect', 'grad', 'fill', 'guides') else 'arrow')
         self.render_mask_ui(); self.update_view_name()
         self._shown = None if self._shown is None else self._shown
         self.request(); self.draw_overlay()
@@ -1818,11 +1834,12 @@ class DevelopTab:
             if k.lower() == 'z' and not (e.state & 0x1): self.goto(self.h_index - 1); return 'break'
             if k.lower() == 'y' or (k.lower() == 'z' and e.state & 0x1): self.goto(self.h_index + 1); return 'break'
         if typing: return
-        if k == 'Escape' and self.tool in ('lasso', 'mlasso') and self.lasso: self.lasso = None; self.draw_overlay()
+        if k == 'Escape' and self.tool in LASSOS and self.lasso: self.lasso = None; self.draw_overlay()
         elif k == 'Escape' and self.tool: self.end_tool(False)
         elif k == 'Return' and self.tool in ('crop', 'guides'): self.end_tool(True)
         elif k == 'backslash': self.set_before(True)
         elif k in ('Delete', 'BackSpace') and self.tool == 'spot': self.delete_spot(self.sel_spot)
+        elif k in ('Delete', 'BackSpace') and self.tool == 'grad': self.grad_delete(self.grad_sel)
         elif k in ('Delete', 'BackSpace') and self.tool == 'sam' and self.sam_prompt:
             pr = self.sam_prompt
             if pr['points']: pr['points'].pop()
@@ -1830,8 +1847,8 @@ class DevelopTab:
             self.draw_overlay(); self.sam_update()
         elif k == 'space' and self.tool in RETOUCH_TOOLS: self.space = True
         elif k in ('bracketleft', 'bracketright') and self.tool == 'brush': self.set_brush_size(self.brush['size'] * (1.25 if k == 'bracketright' else 0.8))
-        elif self.tool == 'mlasso' and self.lasso and k in ('BackSpace', 'Delete'): self.lasso_back()
-        elif self.tool == 'mlasso' and self.lasso and k == 'Return': self.lasso_close(bool(e.state & ALT))
+        elif self.tool in ('mlasso', 'poly') and self.lasso and k in ('BackSpace', 'Delete'): self.lasso_back()
+        elif self.tool in ('mlasso', 'poly') and self.lasso and k == 'Return': self.lasso_close(bool(e.state & ALT))
 
     def _keyup(self, e):
         if e.keysym == 'backslash': self.set_before(False)
@@ -1853,6 +1870,10 @@ class DevelopTab:
     def _hover(self, e):
         if self.tool in ('brush', 'spot'): self.cursor = (e.x, e.y); self.draw_overlay()
         if self.tool == 'mlasso' and self.lasso and not self._drag: self.lasso_move(*self.to_uv(e.x, e.y))
+        if self.tool == 'poly' and self.lasso and not self._drag: self.lasso['preview'] = [self.to_uv(e.x, e.y)]; self.draw_overlay()
+        if self.tool == 'grad' and not self._drag:
+            h = self.grad_hit(e.x, e.y)
+            self.cv.configure(cursor={'mid': 'fleur', 'rot': 'exchange', 'aline': 'sb_v_double_arrow', 'bline': 'sb_v_double_arrow'}.get(h and h[1], 'crosshair'))
         if self.tool == 'crop' and not self._drag:
             h = self.crop_hit(e.x, e.y)
             self.cv.configure(cursor={'n': 'sb_v_double_arrow', 's': 'sb_v_double_arrow', 'e': 'sb_h_double_arrow', 'w': 'sb_h_double_arrow',
@@ -1904,6 +1925,14 @@ class DevelopTab:
             now = time.time(); lc = getattr(self, '_last_click', None); self._last_click = (now, e.x, e.y)
             if self.lasso and lc and now - lc[0] < 0.4 and math.hypot(e.x - lc[1], e.y - lc[2]) < 6: self.lasso_close(alt); return
             self.lasso_erase = alt; self.lasso_click(u, v); return
+        if t == 'poly':
+            now = time.time(); lc = getattr(self, '_last_click', None); self._last_click = (now, e.x, e.y)
+            if self.lasso and lc and now - lc[0] < 0.4 and math.hypot(e.x - lc[1], e.y - lc[2]) < 6: self.lasso_close(alt); return
+            self.lasso_erase = alt; self.poly_click(u, v); return
+        if t == 'rect':
+            self._drag = dict(kind='rect', p=(u, v), cur=(u, v), erase=alt); return
+        if t == 'grad':
+            self.grad_press(e, alt); return
         if t == 'brush':
             m = self.ensure_mask(); x, y = self.to_frame(*self.c2s(u, v))
             c = dict(type='brush', erase=self.brush['erase'], size=self.brush['size'], feather=self.brush['feather'], flow=self.brush['flow'], pts=[[x, y]])
@@ -1947,6 +1976,10 @@ class DevelopTab:
             d['last'] = (e.x, e.y); d['c']['pts'].append(list(self.to_frame(*self.c2s(u, v)))); self.stroke_preview(d['c'])
         elif k == 'sam':
             d['cur'] = (e.x, e.y); self.draw_overlay()
+        elif k == 'rect':
+            d['cur'] = (u, v); self.draw_overlay()
+        elif k == 'grad':
+            self.grad_motion(d, e)
         elif k == 'crop':
             self.params['geometry']['crop'] = self.drag_crop(d['start'], d['h'], u - d['p'][0], v - d['p'][1])
             self.params['geometry']['auto'] = False; self.redraw(); self.update_view_name()
@@ -1968,6 +2001,8 @@ class DevelopTab:
         elif k == 'brush':
             self.changed(); self.render_mask_ui(); self.commit('Mask erased' if d['c']['erase'] else 'Mask painted')
         elif k == 'lasso': self.lasso_add(d['erase'] or bool(e.state & ALT))
+        elif k == 'rect': self.rect_add(d['p'], (u, v), d['erase'] or bool(e.state & ALT))
+        elif k == 'grad': self.grad_release(d)
         elif k == 'sam':
             pr = self.sam_prompt
             if not pr: return
@@ -1992,7 +2027,11 @@ class DevelopTab:
             self.set_zoom('fit' if self.zoom != 'fit' else 1, (e.x, e.y))
 
     def _dbl(self, e):
-        if self.tool == 'spot':
+        if self.tool == 'grad':
+            h = self.grad_hit(e.x, e.y)
+            if h and h[1] == 'mid': self.grad_delete(h[0])
+        elif self.tool in ('mlasso', 'poly') and self.lasso: self.lasso_close(bool(e.state & ALT))
+        elif self.tool == 'spot':
             h = self.spot_hit(e.x, e.y)
             if h: self.delete_spot(h[0])
         elif self.tool == 'guides':
@@ -2189,12 +2228,14 @@ class DevelopTab:
             if s.path is None and s.row.master is self.mask_body: s.sync()
         self.parts.delete(0, 'end')
         if m:
-            nb = ns = nl = nf = 0
+            nb = ns = nf = 0; n = {}
             for c in m['comps']:
                 if c['type'] == 'sam':
                     ns += 1; pr = c.get('prompt')
                     name = f'SAM2 selection {ns}' + (f" ({len(pr['points'])} point{'s' if len(pr['points']) != 1 else ''}{', box' if pr.get('box') else ''})" if pr else '')
-                elif c['type'] == 'poly': nl += 1; name = f"{'Magnetic lasso' if c.get('magnetic') else 'Lasso'} {nl}"
+                elif c['type'] in ('poly', 'grad'):
+                    kind = 'Gradient' if c['type'] == 'grad' else {'rect': 'Rectangle', 'polygon': 'Polygon'}.get(c.get('shape')) or ('Magnetic lasso' if c.get('magnetic') else 'Lasso')
+                    n[kind] = n.get(kind, 0) + 1; name = f'{kind} {n[kind]}'
                 elif c['type'] == 'fill': nf += 1; name = c.get('label') or f'Fill {nf}'
                 else: nb += 1; name = f'Brush stroke {nb}'
                 editing = self.sam_prompt is not None and self.sam_prompt.get('comp') is c
@@ -2217,10 +2258,17 @@ class DevelopTab:
         if self.sam_prompt and self.sam_prompt.get('comp') is c: self.sam_prompt.update(comp=None, points=[], box=None); self.draw_overlay()
         del m['comps'][i]; self.changed(); self.render_mask_ui(); self.commit(f"Mask part deleted ({m['name']})")
 
+    def part_picked(self):
+        m, i = self._sel_part()
+        if i is not None and self.tool == 'grad' and m['comps'][i]['type'] == 'grad': self.grad_sel = m['comps'][i]; self.draw_overlay()
+
     def part_edit(self):
         m, i = self._sel_part()
         if i is None: return
         c = m['comps'][i]
+        if c['type'] == 'grad':
+            if self.tool != 'grad': self.set_tool('grad')
+            self.grad_sel = c; self.draw_overlay(); return
         if c['type'] != 'sam' or not c.get('prompt'): return
         if self.tool != 'sam': self.set_tool('sam')
         elif self.sam_prompt and self.sam_prompt.get('comp') not in (None, c): self.commit('SAM2 selection')
@@ -2251,9 +2299,123 @@ class DevelopTab:
         m = self.ensure_mask(); step = max(1, len(L['pts']) // 2000)
         pts = [list(self.to_frame(*self.c2s(u, v))) for u, v in L['pts'][::step]]
         sub = bool(erase) != bool(self.brush['erase'])
-        m['comps'].append(dict(type='poly', pts=pts, erase=sub, featherPx=float(self.lasso_feather.get()), magnetic=bool(L.get('magnetic'))))
+        c = dict(type='poly', pts=pts, erase=sub, featherPx=float(self.lasso_feather.get()), magnetic=bool(L.get('magnetic')))
+        if L.get('polygon'): c['shape'] = 'polygon'
+        m['comps'].append(c)
         self.changed(); self.render_mask_ui(); self.draw_overlay()
-        self.commit(f"{'Magnetic lasso' if L.get('magnetic') else 'Lasso'}{' (subtract)' if sub else ''}")
+        self.commit(f"{'Magnetic lasso' if L.get('magnetic') else 'Polygon' if L.get('polygon') else 'Lasso'}{' (subtract)' if sub else ''}")
+
+    def poly_click(self, u, v):
+        L = self.lasso
+        if not L:
+            self.lasso = dict(pts=[(u, v)], anchors=[0], polygon=True, preview=[]); self.draw_overlay(); return
+        W, H = self.view_wh(); first = L['pts'][0]
+        if len(L['pts']) > 2 and math.hypot((u - first[0]) * W, (v - first[1]) * H) < 9: self.lasso_close(); return
+        L['pts'].append((u, v)); L['anchors'].append(len(L['pts']) - 1); L['preview'] = []
+        self.draw_overlay()
+
+    def rect_add(self, p, q, erase):
+        W, H = self.view_wh()
+        if abs(q[0] - p[0]) * W < 3 or abs(q[1] - p[1]) * H < 3: self.draw_overlay(); return
+        m = self.ensure_mask()
+        pts = [list(self.to_frame(*self.c2s(u, v))) for u, v in ((p[0], p[1]), (q[0], p[1]), (q[0], q[1]), (p[0], q[1]))]
+        sub = bool(erase) != bool(self.brush['erase'])
+        m['comps'].append(dict(type='poly', pts=pts, erase=sub, featherPx=float(self.lasso_feather.get()), magnetic=False, shape='rect'))
+        self.changed(); self.render_mask_ui(); self.draw_overlay()
+        self.commit(f"Rectangle{' (subtract)' if sub else ''}")
+
+    # linear gradients: a (full effect) and b (none) in frame coordinates, worked on in canvas pixels
+    def grad_xy(self, q):
+        return self.from_uv(*self.s2c(*self.to_img(*q)))
+
+    def grad_frame(self, X, Y):
+        return list(self.to_frame(*self.c2s(*self.to_uv(X, Y))))
+
+    def grads(self):
+        return [c for c in (self.cur_mask() or {}).get('comps', []) if c['type'] == 'grad']
+
+    def draw_grads(self):
+        cv, C = self.cv, self.C
+        gs = self.grads()
+        if not any(c is self.grad_sel for c in gs): self.grad_sel = None
+        E = 4 * (self.cv.winfo_width() + self.cv.winfo_height())
+        for c in gs:
+            (ax, ay), (bx, by) = self.grad_xy(c['a']), self.grad_xy(c['b'])
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            if c is self.grad_sel:
+                L = math.hypot(bx - ax, by - ay) or 1; nx, ny = -(by - ay) / L * E, (bx - ax) / L * E
+                col = C['err'] if c.get('erase') else '#ffffff'
+                for (X, Y), dash in (((ax, ay), ()), ((mx, my), (6, 4)), ((bx, by), (2, 4))):
+                    cv.create_line(X - nx, Y - ny, X + nx, Y + ny, fill='#000000', width=3, tags='ov')
+                    cv.create_line(X - nx, Y - ny, X + nx, Y + ny, fill=col, width=1, dash=dash, tags='ov')
+                cv.create_line(ax, ay, bx, by, fill=col, dash=(2, 3), tags='ov')
+                for X, Y in ((ax, ay), (bx, by)): cv.create_oval(X - 6, Y - 6, X + 6, Y + 6, fill='#fff', outline='#000', width=2, tags='ov')
+            cv.create_oval(mx - 7, my - 7, mx + 7, my + 7, fill=C['accent'] if c is self.grad_sel else '#888888', outline='#000', width=2, tags='ov')
+
+    def grad_hit(self, X, Y):
+        """(gradient, part): part 'a' / 'b' (an end), 'mid', 'rot' (the centre line), 'aline' / 'bline' (an outer line); or None."""
+        gs = self.grads(); sel = self.grad_sel if any(c is self.grad_sel for c in gs) else None
+        if sel:
+            for part in ('a', 'b'):
+                if math.dist((X, Y), self.grad_xy(sel[part])) < 10: return sel, part
+        for c in ([sel] if sel else []) + [c for c in reversed(gs) if c is not sel]:
+            (ax, ay), (bx, by) = self.grad_xy(c['a']), self.grad_xy(c['b'])
+            if math.dist((X, Y), ((ax + bx) / 2, (ay + by) / 2)) < 10: return c, 'mid'
+        if sel:
+            (ax, ay), (bx, by) = self.grad_xy(sel['a']), self.grad_xy(sel['b'])
+            L = math.hypot(bx - ax, by - ay) or 1; dx, dy = (bx - ax) / L, (by - ay) / L
+            t = (X - ax) * dx + (Y - ay) * dy   # distance along a -> b
+            for part, at in (('rot', L / 2), ('aline', 0), ('bline', L)):
+                if abs(t - at) < 6: return sel, part
+        return None
+
+    def grad_press(self, e, alt):
+        h = self.grad_hit(e.x, e.y)
+        if h:
+            c, part = h; self.grad_sel = c
+        else:
+            m = self.ensure_mask(); q = self.grad_frame(e.x, e.y)
+            c = dict(type='grad', a=q, b=list(q), erase=bool(alt) != bool(self.brush['erase']))
+            m['comps'].append(c); self.grad_sel = c; part = 'b'; self.render_mask_ui()
+        self._drag = dict(kind='grad', c=c, part=part, p=(e.x, e.y), a=self.grad_xy(c['a']), b=self.grad_xy(c['b']), new=not h, moved=False)
+        self.draw_overlay()
+
+    def grad_motion(self, d, e):
+        c, part = d['c'], d['part']; (ax, ay), (bx, by) = d['a'], d['b']
+        dx, dy = e.x - d['p'][0], e.y - d['p'][1]
+        if part == 'a': A, B = (ax + dx, ay + dy), (bx, by)
+        elif part == 'b': A, B = (ax, ay), (bx + dx, by + dy)
+        elif part == 'mid': A, B = (ax + dx, ay + dy), (bx + dx, by + dy)
+        elif part == 'rot':   # turn about the middle, keeping the length
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            r = math.atan2(e.y - my, e.x - mx) - math.atan2(d['p'][1] - my, d['p'][0] - mx)
+            cs, sn = math.cos(r), math.sin(r)
+            turn = lambda x, y: (mx + (x - mx) * cs - (y - my) * sn, my + (x - mx) * sn + (y - my) * cs)
+            A, B = turn(ax, ay), turn(bx, by)
+        else:   # an outer line: along the gradient's direction only, never past the other line
+            L = math.hypot(bx - ax, by - ay) or 1; ux, uy = (bx - ax) / L, (by - ay) / L
+            s = dx * ux + dy * uy
+            if part == 'aline': s = min(s, L - 2); A, B = (ax + s * ux, ay + s * uy), (bx, by)
+            else: s = max(s, 2 - L); A, B = (ax, ay), (bx + s * ux, by + s * uy)
+        if math.dist(A, B) < 2: return
+        c['a'], c['b'] = self.grad_frame(*A), self.grad_frame(*B)
+        d['moved'] = True; self.draw_overlay(); self.changed()
+
+    def grad_release(self, d):
+        c = d['c']
+        if d['new'] and math.dist(self.grad_xy(c['a']), self.grad_xy(c['b'])) < 4:   # a click, not a drag
+            m = self.cur_mask()
+            if m: m['comps'] = [x for x in m['comps'] if x is not c]
+            self.grad_sel = None; self.render_mask_ui(); self.draw_overlay(); return
+        if d['moved']:
+            self.changed(); self.render_mask_ui()
+            self.commit(('Gradient' + (' (subtract)' if c.get('erase') else '')) if d['new'] else 'Gradient adjusted')
+
+    def grad_delete(self, c):
+        m = self.cur_mask()
+        if not m or c is None or not any(x is c for x in m['comps']): return
+        m['comps'] = [x for x in m['comps'] if x is not c]; self.grad_sel = None
+        self.changed(); self.render_mask_ui(); self.draw_overlay(); self.commit(f"Gradient deleted ({m['name']})")
 
     def retouch_snapshot(self):
         """The picture as shown in the retouch view (for the magnetic lasso and the fill tool)."""
