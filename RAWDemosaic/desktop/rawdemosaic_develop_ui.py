@@ -23,6 +23,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 import rawdemosaic_develop as V
+import rawdemosaic_colour as CM
 import rawdemosaic_engine as E
 
 ALT = 0x20000 if os.name == 'nt' else 0x8   # the Alt key's bit in a Tk event's state
@@ -504,6 +505,7 @@ class DevelopTab:
         self.slider(s.body, 'Radius', ['usmRadius'], 0.3, 5, 0.1, dec=1, unit=' px', hist='Sharpen radius')
         self.slider(s.body, 'Threshold', ['usmThreshold'], 0, 30, 1, hist='Sharpen threshold')
         self._build_sr(left)
+        self._build_proof(left)
         self.muted(left, 'Double-click a slider\'s name to reset it. Microcontrast and sharpening work at pixel scale: judge them at 100%. '
                          'Hold Before (or \\) to compare; Ctrl+Z / Ctrl+Y undo and redo.')
         # pinned: super-resolution and export
@@ -513,6 +515,7 @@ class DevelopTab:
         ttk.Combobox(sr, textvariable=self.sr_target, state='readonly', width=22, values=[v for _, v in D.SR_TARGETS]).pack(side='left', padx=6)
         self.sr_models_lbl = ttk.Label(sr, text='', style='Muted.TLabel'); self.sr_models_lbl.pack(side='left')
         for v in (self.sr_on, self.sr_target, self.sr_down): v.trace_add('write', lambda *a: self.refresh_sr())
+        self.conv_lbl = ttk.Label(pinned, text='', style='Muted.TLabel')
         r = ttk.Frame(pinned); r.pack(fill='x', pady=(4, 0))
         self.save_tif_btn = ttk.Button(r, text='Save TIFF…', style='Accent.TButton', command=lambda: self.export('tiff'))
         self.save_tif_btn.pack(side='left', fill='x', expand=True)
@@ -523,6 +526,7 @@ class DevelopTab:
         self.view_name = ttk.Label(bar, text='', style='Tag.TLabel'); self.view_name.pack(side='left')
         self.before_btn = ttk.Button(bar, text='Before', style='Small.TButton'); self.before_btn.pack(side='right')
         self.before_btn.bind('<ButtonPress-1>', lambda e: self.set_before(True)); self.before_btn.bind('<ButtonRelease-1>', lambda e: self.set_before(False))
+        ttk.Checkbutton(bar, text='Soft proof', variable=self.proof_on, command=self._proof_changed).pack(side='right', padx=(0, 8))
         self.zoom_lbl = ttk.Label(bar, text='Fit', style='Tag.TLabel', width=6); self.zoom_lbl.pack(side='right', padx=6)
         self.zoom_var = tk.IntVar(value=0)
         self.ZOOMS = ['fit', 0.1, 0.17, 0.25, 0.33, 0.5, 0.67, 1, 1.5, 2, 3, 4]
@@ -536,7 +540,7 @@ class DevelopTab:
         self._bind_view()
         self.sync_all()
         if self.on_right.get(): self.place_controls()
-        self.refresh_sr()
+        self.refresh_sr(); self._proof_note()
 
     def place_controls(self):
         """Develop's controls on the left (as the other tabs) or on the right (as the web version)."""
@@ -578,6 +582,86 @@ class DevelopTab:
         ttk.Spinbox(r, textvariable=self.sr_w, from_=0, to=100, increment=0.1, width=5).pack(side='left', padx=(4, 0))
         r = self.row(b)
         for t, cmd in (('Add', self.sr_add), ('Update selected', self.sr_update), ('Remove', self.sr_remove)): self.btn(r, t, cmd)
+
+    # ─── soft proofing, and converting exports to a profile (e.g. a lab's printer profile)
+    def _build_proof(self, left):
+        pf = self.app.settings.get('proof') or {}
+        self.proof_on = tk.BooleanVar(value=False)   # starts off: the normal view is the screen's
+        self.proof_path = pf.get('path', '')
+        self.proof_label = tk.StringVar()
+        self.proof_intent = tk.StringVar(value={k: l for k, l, _ in CM.INTENTS}.get(pf.get('intent', 'relative'), 'Relative colorimetric'))
+        self.proof_bpc = tk.BooleanVar(value=pf.get('bpc', True))
+        self.proof_paper = tk.BooleanVar(value=pf.get('paper', False))
+        self.proof_gamut = tk.BooleanVar(value=pf.get('gamut', False))
+        self.proof_convert = tk.BooleanVar(value=pf.get('convert', False))
+        s = self.sec(left, 'proof', 'Soft proof & convert to a profile')
+        b = s.body
+        r = self.row(b); ttk.Label(r, text='Profile', style='Card.TLabel', width=15).pack(side='left')
+        self.proof_box = ttk.Combobox(r, textvariable=self.proof_label, state='readonly'); self.proof_box.pack(side='left', fill='x', expand=True)
+        self.proof_box.bind('<<ComboboxSelected>>', lambda e: self._proof_picked())
+        r = self.row(b); ttk.Label(r, text='Rendering intent', style='Card.TLabel', width=15).pack(side='left')
+        cb = ttk.Combobox(r, textvariable=self.proof_intent, state='readonly', values=[l for _, l, _ in CM.INTENTS]); cb.pack(side='left', fill='x', expand=True)
+        cb.bind('<<ComboboxSelected>>', lambda e: self._proof_changed())
+        for text, var in (('Black point compensation', self.proof_bpc),
+                          ('Soft proof: show the image as it will print', self.proof_on),
+                          ('Simulate paper and ink (the paper\'s white, the ink\'s black)', self.proof_paper),
+                          ('Gamut warning: colours the profile cannot reproduce in magenta', self.proof_gamut),
+                          ('Convert to this profile when saving (the TIFF and JPEG embed it)', self.proof_convert)):
+            ttk.Checkbutton(b, text=text, variable=var, style='Card.TCheckbutton', command=self._proof_changed).pack(anchor='w')
+        self.muted(b, 'Perceptual fits every colour into what the printer can make; relative colorimetric keeps the colours it can make exactly and '
+                      'clips the rest (use it with black point compensation). Convert when a lab or printer driver asks for files in its profile: '
+                      'many labs want sRGB, and give profiles for proofing only. Profiles are listed from the profiles folder next to the app '
+                      'and the system\'s colour folder.')
+        self._fill_proof_profiles()
+
+    def _fill_proof_profiles(self):
+        found = CM.list_profiles(space=None)
+        items = CM.labelled([i for i in found if i['cls'] == 'prtr'] + [i for i in found if i['cls'] not in ('prtr', 'scnr')])
+        p0 = self.proof_path
+        if p0 and not any(os.path.normcase(p) == os.path.normcase(p0) for _, p in items) and CM.info(p0):
+            items += CM.labelled([CM.info(p0)])
+        self._proof_items = items
+        self.proof_box.configure(values=[l for l, _ in items] + ['Browse…'])
+        self.proof_label.set(next((l for l, p in items if os.path.normcase(p) == os.path.normcase(p0 or '?')), ''))
+
+    def _proof_picked(self):
+        l = self.proof_label.get()
+        if l == 'Browse…':
+            p = filedialog.askopenfilename(title='Printer or output profile', initialdir=os.path.join(E.APP_ROOT, 'profiles'),
+                                           filetypes=[('ICC profiles', '*.icc *.icm'), ('All files', '*.*')])
+            if p and CM.info(p) is None: messagebox.showerror(APP, f'{os.path.basename(p)} is not an ICC profile.'); p = ''
+            if p: self.proof_path = os.path.normpath(p)
+            self._fill_proof_profiles()
+        else:
+            self.proof_path = dict(self._proof_items).get(l, '')
+        self._proof_changed()
+
+    def _intent_key(self):
+        return next((k for k, l, _ in CM.INTENTS if l == self.proof_intent.get()), 'relative')
+
+    def _proof_changed(self):
+        if (self.proof_on.get() or self.proof_convert.get()) and not self.proof_path:
+            self.proof_on.set(False); self.proof_convert.set(False)
+            messagebox.showinfo(APP, 'Choose a profile under "Soft proof & convert to a profile" first.')
+        if self.proof_convert.get():
+            try: CM.check_output_profile(self.proof_path)
+            except ValueError as ex: self.proof_convert.set(False); messagebox.showerror(APP, str(ex))
+        self.app.settings['proof'] = dict(path=self.proof_path, intent=self._intent_key(), bpc=self.proof_bpc.get(), paper=self.proof_paper.get(),
+                                          gamut=self.proof_gamut.get(), convert=self.proof_convert.get())
+        self._proof_note(); self.update_view_name(); self.request()
+
+    def _proof_note(self):
+        i = CM.info(self.proof_path) if self.proof_path else None
+        if self.proof_convert.get() and i:
+            self.conv_lbl.configure(text=f'Saving converted to {i["desc"]} ({self.proof_intent.get().lower()})')
+            self.conv_lbl.pack(fill='x', pady=(4, 0), before=self.save_tif_btn.master)
+        else:
+            self.conv_lbl.pack_forget()
+
+    def proof_cfg(self):
+        """The soft proof for the view, or None."""
+        if not self.proof_on.get() or not self.proof_path or not os.path.isfile(self.proof_path): return None
+        return dict(path=self.proof_path, intent=self._intent_key(), bpc=self.proof_bpc.get(), paper=self.proof_paper.get(), gamut=self.proof_gamut.get())
 
     def refresh_sr_models(self, labels):
         self.sr_box.configure(values=labels)
@@ -1352,7 +1436,7 @@ class DevelopTab:
             traceback.print_exc(); return
         cw, ch = max(10, self.cv.winfo_width()), max(10, self.cv.winfo_height())
         lw, lh = self.view_dims(kind)
-        req = dict(kind=kind, params=wp, neutral=self.before, lw=lw, lh=lh, cw=cw, ch=ch)
+        req = dict(kind=kind, params=wp, neutral=self.before, lw=lw, lh=lh, cw=cw, ch=ch, proof=self.proof_cfg())
         if self.zoom == 'fit' or kind == 'uncropped':
             s = min((cw - 8) / lw, (ch - 8) / lh, 1)
             req.update(mode='preview', max_side=max(64, min(2560, math.ceil(max(lw, lh) * s))))
@@ -1393,19 +1477,20 @@ class DevelopTab:
                     else:
                         px = dv.render_region(p, req['region'], neutral=req['neutral']); ov = None
                     rgb = V.to_srgb8(np.ascontiguousarray(px, np.float32))
+                scr = CM.screen_linear(np.ascontiguousarray(px, np.float32), req.get('proof'))   # None: rgb is right for the screen
                 hist = None
                 if req['hist']:
                     f = rgb.reshape(-1, 3)[::max(1, rgb.shape[0] * rgb.shape[1] // 250000)].astype(np.int64)
                     hist = [np.bincount(f[:, c], minlength=256) for c in range(3)] + [np.bincount(np.round(f @ [0.2126, 0.7152, 0.0722]).astype(np.int64), minlength=256)]
-                self.app.q.put(('call', self._show, req, rgb, ov, hist, time.time() - t0))
+                self.app.q.put(('call', self._show, req, rgb, ov, hist, time.time() - t0, scr))
             except Exception as ex:
                 traceback.print_exc()
                 self.app.q.put(('log', 'err', f'Develop: {ex}'))
             finally:
                 self.rendering = False
 
-    def _show(self, req, rgb, ov, hist, dt):
-        self._shown = dict(req=req, rgb=rgb, ov=ov)
+    def _show(self, req, rgb, ov, hist, dt, scr=None):
+        self._shown = dict(req=req, rgb=rgb, ov=ov, scr=scr)
         self.timing.configure(text=f'{dt * 1000:.0f} ms')
         if hist is not None:
             self.hist = hist; self.draw_hist()
@@ -1431,7 +1516,7 @@ class DevelopTab:
         if not self.ready() or sh is None:
             cv.create_text(cv.winfo_width() / 2, cv.winfo_height() / 2, text='Nothing to develop yet', fill=self.C['muted'])
             return
-        rgb, req = sh['rgb'], sh['req']
+        rgb, req = sh['rgb'] if sh.get('scr') is None else sh['scr'], sh['req']
         s, x0, y0 = self.layout()
         if req['mode'] == 'region':
             rx, ry, rw, rh = req['region']
@@ -1511,7 +1596,8 @@ class DevelopTab:
         w, h = self.view_dims()
         t = {'crop': 'Crop & straighten', 'guides': 'Guides (shown without the perspective correction)'}.get(self.tool) or \
             ('Retouch view (without crop, rotation and lens corrections)' if self.tool in SV_TOOLS else 'Before Develop' if self.before else 'Developed result')
-        self.view_name.configure(text=f'{t}   ·   {w} × {h}' + (' (quick preview)' if self.info.get('quick') else ''))
+        self.view_name.configure(text=f'{t}   ·   {w} × {h}' + (' (quick preview)' if self.info.get('quick') else '') +
+                                 (f'   ·   soft proof: {CM.info(self.proof_path)["desc"]}' if self.proof_cfg() else ''))
 
     def set_zoom(self, z, focus=None):
         """z: 'fit' or a scale; focus: (canvas x, y) to keep still."""
@@ -2552,6 +2638,10 @@ class DevelopTab:
         except Exception as ex: messagebox.showerror(APP, str(ex)); return
         if o['sr']['enabled'] and not any(m['weight'] > 0 for m in o['sr']['models']):
             messagebox.showinfo(APP, 'Add one or more models under Super-resolution (on export), or untick Upscale.'); return
+        if self.proof_convert.get():
+            try: CM.check_output_profile(self.proof_path)
+            except ValueError as ex: messagebox.showerror(APP, str(ex)); return
+            o['convert'] = dict(path=self.proof_path, intent=self._intent_key(), bpc=self.proof_bpc.get())
         wp = self.worker_params()
 
         def work(job):

@@ -20,6 +20,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 import rawdemosaic_engine as E
+import rawdemosaic_colour as CM
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(HERE, 'rawdemosaic_settings.json')
@@ -156,7 +157,7 @@ class ImageView:
         if self.scale is None:
             tw, th = max(1, int(w * s)), max(1, int(h * s))
             if not self._fitcache or self._fitcache[0] != (tw, th):
-                self._fitcache = ((tw, th), self.pil.resize((tw, th), Image.BOX if s < 1 else Image.NEAREST, reducing_gap=3.0 if s < 0.5 else None))
+                self._fitcache = ((tw, th), CM.screen_srgb(self.pil.resize((tw, th), Image.BOX if s < 1 else Image.NEAREST, reducing_gap=3.0 if s < 0.5 else None)))
             self._photo = ImageTk.PhotoImage(self._fitcache[1])
             cv.create_image((cw - tw) / 2, (ch - th) / 2, image=self._photo, anchor='nw')
         else:
@@ -167,7 +168,7 @@ class ImageView:
                 crop = self.pil.crop((ix0, iy0, ix1, iy1))
                 dw, dh = max(1, round((ix1 - ix0) * s)), max(1, round((iy1 - iy0) * s))
                 crop = crop.resize((dw, dh), Image.BOX if s < 1 else Image.NEAREST)
-                self._photo = ImageTk.PhotoImage(crop)
+                self._photo = ImageTk.PhotoImage(CM.screen_srgb(crop))
                 cv.create_image((ix0 - x0) * s, (iy0 - y0) * s, image=self._photo, anchor='nw')
         if self.overlay: self.overlay(self)
         zoom = 'fit' if self.scale is None else f'{s * 100:.0f}%'
@@ -251,6 +252,7 @@ class App:
         if s.get('defaults', 1) < 2:   # version 2: ProPhoto RGB and column TIFFs by default
             s.setdefault('out', {}).update(space='prophoto', save_columns=True)
             s['defaults'] = 2
+        CM.set_monitor(s.get('monitor', 'system'))   # every view is converted to the screen's colours
         self.files = []                          # input paths (Process tab)
         self.src_cache = {}                      # path -> RawFile / ImageInput (the last two)
         self.results = []
@@ -297,6 +299,43 @@ class App:
                 json.dump(s, f, indent=1)
         except Exception:
             pass
+
+    # ─── the monitor profile
+    MON_SYSTEM, MON_NONE, BROWSE = 'System profile for this screen', 'None (the screen is taken as sRGB)', 'Browse…'
+
+    def _fill_monitors(self):
+        ch = self.settings.get('monitor', 'system')
+        items = [(self.MON_SYSTEM, 'system'), (self.MON_NONE, '')] + CM.labelled(CM.list_profiles(('mntr',)))
+        if ch not in ('system', '') and not any(os.path.normcase(p) == os.path.normcase(ch) for _, p in items) and CM.info(ch):
+            items += CM.labelled([CM.info(ch)])
+        self._mon_items = items
+        self.mon_box.configure(values=[l for l, _ in items] + [self.BROWSE])
+        self.mon_var.set(next((l for l, p in items if os.path.normcase(p) == os.path.normcase(ch)), self.MON_SYSTEM))
+        m = CM.monitor()
+        if m: t = f'Views are converted to {CM.info(m)["desc"]}.'
+        elif ch == 'system': t = 'The system has no profile for this screen (or only sRGB): views are shown as sRGB.'
+        else: t = 'Views are shown as sRGB.'
+        self.mon_note.configure(text=t)
+
+    def _monitor_chosen(self):
+        l = self.mon_var.get()
+        if l == self.BROWSE:
+            p = filedialog.askopenfilename(title='Monitor profile', initialdir=os.path.join(E.APP_ROOT, 'profiles'),
+                                           filetypes=[('ICC profiles', '*.icc *.icm'), ('All files', '*.*')])
+            if p and CM.info(p) is None: messagebox.showerror(APP, f'{os.path.basename(p)} is not an ICC profile.'); p = ''
+            if not p: self._fill_monitors(); return
+            ch = os.path.normpath(p)
+        else:
+            ch = dict(self._mon_items).get(l, 'system')
+        self.settings['monitor'] = ch
+        CM.set_monitor(ch)
+        self._fill_monitors(); self._save_settings(); self.refresh_views()
+
+    def refresh_views(self):
+        """Redraw every view, e.g. for a new monitor profile."""
+        for v in (self.view, self.bl_view):
+            v._fitcache = None; v.redraw()
+        self.develop.request()
 
     def _remember_dir(self, key, path):
         if path: self.settings[key] = os.path.dirname(path) if os.path.isfile(path) else path
@@ -654,6 +693,16 @@ class App:
         ttk.Entry(r, textvariable=self.out_dir).pack(side='left', fill='x', expand=True)
         ttk.Button(r, text='…', width=3, command=self.choose_out_dir).pack(side='left', padx=(4, 0))
         ttk.Label(c, text='Empty: next to each input file.', style='Muted.TLabel').pack(anchor='w')
+
+        c = self._card(left, 'Colour management')
+        self.mon_var = tk.StringVar()
+        self.mon_box = self._row(c, 'Monitor profile', lambda p: self._combo(p, self.mon_var, ['']))
+        self.mon_box.bind('<<ComboboxSelected>>', lambda e: self._monitor_chosen())
+        self.mon_note = ttk.Label(c, text='', style='Card.TLabel', justify='left'); self.mon_note.pack(anchor='w')
+        ttk.Label(c, text='Every view is converted to the screen\'s colours. Soft proofing and converting to a printer\'s\n'
+                          'profile are in Develop. Profiles are listed from the profiles folder next to the app and the\n'
+                          'system\'s colour folder.', style='Muted.TLabel', justify='left').pack(anchor='w')
+        self._fill_monitors()
 
         c = self._card(left, 'Models')
         r = ttk.Frame(c, style='Card.TFrame'); r.pack(fill='x', pady=2)

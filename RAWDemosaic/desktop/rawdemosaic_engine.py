@@ -197,19 +197,22 @@ def orient(img, flip):
 
 
 # ───────────────────────────────────────────── ICC profiles, TIFF and JPEG output
-def icc_profile(space):
-    """ICC v2 matrix/TRC display profile for an output space (byte-identical in structure to the web app's)."""
+def icc_profile(space, gamma=None, name=None):
+    """ICC v2 matrix/TRC display profile for an output space (byte-identical in structure to the web app's).
+    gamma / name: the space's primaries with a plain gamma curve instead (e.g. for views)."""
     sp = SPACES[space]
     M = sp['toXYZ']
     if sp['white'] == D65: M = D65_TO_D50 @ M   # ICC colorants are relative to the D50 PCS
-    name = sp['name'].encode('ascii') + b'\0'
+    name = (name or sp['name']).encode('ascii') + b'\0'
     desc = bytearray(12 + len(name) + 4 + 4 + 2 + 1 + 67)
     desc[0:4] = b'desc'; struct.pack_into('>I', desc, 8, len(name)); desc[12:12 + len(name)] = name
     text = b'text\0\0\0\0' + b'No copyright, use freely\0'
 
     def xyz(v):
         return b'XYZ \0\0\0\0' + b''.join(struct.pack('>i', round(x * 65536)) for x in v)
-    if space == 'adobe':
+    if gamma:
+        curv = b'curv\0\0\0\0' + struct.pack('>IH', 1, round(gamma * 256))
+    elif space == 'adobe':
         curv = b'curv\0\0\0\0' + struct.pack('>IH', 1, 563)
     elif space == 'rec2020':
         curv = b'curv\0\0\0\0' + struct.pack('>I', 0)
@@ -242,16 +245,16 @@ def icc_profile(space):
     return bytes(b)
 
 
-def write_tiff16(path, img16, space, software='RAW Demosaic (desktop)'):
+def write_tiff16(path, img16, space, software='RAW Demosaic (desktop)', icc=None):
     import tifffile
-    tifffile.imwrite(path, img16, photometric='rgb', planarconfig='contig', iccprofile=icc_profile(space),
+    tifffile.imwrite(path, img16, photometric='rgb', planarconfig='contig', iccprofile=icc or icc_profile(space),
                      resolution=(300, 300), resolutionunit='INCH', software=software, metadata=None)
 
 
-def write_jpeg(path, srgb8, quality=95):
+def write_jpeg(path, srgb8, quality=95, icc=None):
     from PIL import Image
     Image.fromarray(srgb8).save(path, 'JPEG', quality=int(quality), subsampling=0 if quality >= 90 else 2,
-                                icc_profile=icc_profile('srgb'), optimize=True)
+                                icc_profile=icc or icc_profile('srgb'), optimize=True)
 
 
 # ───────────────────────────────────────────── ICC parsing (for JPEG/TIFF/PNG input and re-blending)
@@ -1492,31 +1495,45 @@ def process(src, columns, opts, models, job, quick=False, on_column=None):
 
 
 def save_outputs(work, stem, opts, models, job):
-    """Linear working -> TIFF (+ JPEG), after restoration / super-resolution."""
+    """Linear working -> TIFF (+ JPEG), after restoration / super-resolution.
+    opts['convert'] = dict(path, intent, bpc): convert both to that ICC profile (e.g. a printer's) and embed it."""
     space = opts.get('out_space', 'srgb')
+    conv = opts.get('convert')
+    if conv:   # from ProPhoto, so that nothing the profile can reproduce is clipped on the way
+        import rawdemosaic_colour as CM
+        space = 'prophoto'
+        lut, icc, label = CM.export_table(space, conv), CM.icc_bytes(conv['path']), CM.info(conv['path'])['desc']
+        to8 = lambda e: np.round(np.clip(e, 0, 1) * 255).astype(np.uint8)
     sr = opts.get('sr') or {}
     each = [] if sr.get('save_each') and sr.get('enabled') and sum(1 for m in sr.get('models', []) if m.get('weight', 0) > 0) > 1 else None
     enc, processed = finish_image(work, space, opts, models, job, each)
+    if conv:
+        job.progress(0.97, f'Converting to {label}')
+        each = [(n, CM.convert(img, lut)) for n, img in each or []] or None
+        enc = CM.convert(enc, lut)
     files = []
     for name, img in each or []:   # each super-resolution model's own result, at the same size as the blend
         safe = ''.join(ch if ch.isalnum() or ch in '-_.' else '_' for ch in name)
         if opts.get('tiff', True):
             p = f'{stem}_sr_{safe}.tif'
-            write_tiff16(p, to_uint16(img), space); files.append(p); job.log('ok', f'saved {os.path.basename(p)}')
+            write_tiff16(p, to_uint16(img), space, icc=icc if conv else None); files.append(p); job.log('ok', f'saved {os.path.basename(p)}')
         if opts.get('jpeg'):
             p = f'{stem}_sr_{safe}.jpg'
-            write_jpeg(p, encoded_to_srgb8(img, space), opts.get('jpeg_quality', 95)); files.append(p); job.log('ok', f'saved {os.path.basename(p)}')
+            write_jpeg(p, to8(img) if conv else encoded_to_srgb8(img, space), opts.get('jpeg_quality', 95), icc=icc if conv else None)
+            files.append(p); job.log('ok', f'saved {os.path.basename(p)}')
     each = None
     if opts.get('tiff', True):
         p = stem + '.tif'
         job.progress(0.99, 'Writing the TIFF')
-        write_tiff16(p, to_uint16(enc), space)
-        files.append(p); job.log('ok', f'saved {os.path.basename(p)} ({enc.shape[1]}×{enc.shape[0]}, {SPACES[space]["label"]})')
+        write_tiff16(p, to_uint16(enc), space, icc=icc if conv else None)
+        files.append(p); job.log('ok', f'saved {os.path.basename(p)} ({enc.shape[1]}×{enc.shape[0]}, {label if conv else SPACES[space]["label"]})')
     if opts.get('jpeg'):
         p = stem + '.jpg'
-        srgb8 = encoded_to_srgb8(enc, space) if processed else to_srgb8(work)
-        write_jpeg(p, srgb8, opts.get('jpeg_quality', 95))
-        files.append(p); job.log('ok', f'saved {os.path.basename(p)} (sRGB, quality {opts.get("jpeg_quality", 95)})')
+        if conv:
+            write_jpeg(p, to8(enc), opts.get('jpeg_quality', 95), icc=icc)
+        else:
+            write_jpeg(p, encoded_to_srgb8(enc, space) if processed else to_srgb8(work), opts.get('jpeg_quality', 95))
+        files.append(p); job.log('ok', f'saved {os.path.basename(p)} ({label if conv else "sRGB"}, quality {opts.get("jpeg_quality", 95)})')
     return files
 
 
