@@ -74,6 +74,15 @@ def _similarity(src, dst):
     return np.hstack([scale * R, t[:, None]]).astype(np.float32)
 
 
+def _iou(a, b):
+    """Overlap of two (x0, y0, x1, y1) boxes, 0..1."""
+    w = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    h = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = w * h
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
 def _nms(boxes, scores, thr):
     order, keep = scores.argsort()[::-1], []
     x0, y0, x1, y1 = boxes.T
@@ -306,9 +315,10 @@ def _face_matrix(cat, where_sql='1', params=()):
 
 
 def suggest_people(cat, thresh=FACE_MATCH):
-    """Faces nobody has named: give each the person whose user-named faces it is most like (assigned='auto')."""
+    """Faces nobody has named: give each the person whose user-named faces it is most like (assigned='auto').
+    Returns how many faces got a different suggestion than before."""
     nid, npid, nv = _face_matrix(cat, "assigned = 'user'")
-    uid, _, uv = _face_matrix(cat, "assigned IS NULL OR assigned = 'auto'")
+    uid, upid, uv = _face_matrix(cat, "assigned IS NULL OR assigned = 'auto'")
     if not len(nid) or not len(uid): return 0
     updates = []
     for i in range(0, len(uid), 4096):
@@ -319,7 +329,7 @@ def suggest_people(cat, thresh=FACE_MATCH):
             updates.append((int(npid[j[k]]) if best[k] >= thresh else None, 'auto' if best[k] >= thresh else None, int(uid[i + k])))
     with cat.tx() as c:
         c.executemany('UPDATE faces SET person_id = ?, assigned = ? WHERE id = ?', updates)
-    return sum(1 for u in updates if u[0])
+    return sum(1 for u, before in zip(updates, upid) if u[0] and u[0] != before)
 
 
 def group_faces(cat, thresh=FACE_GROUP):
@@ -439,8 +449,18 @@ class AI:
                 caps = list(zip([pid for pid, _ in ims], fl.captions([im for _, im in ims])))
             with self.cat.tx() as c:
                 if fm:
+                    # faces found again keep who they are: the old face that overlaps a new one most hands over its name
+                    old = {}
+                    for pid, _ in ims:
+                        old[pid] = c.execute('SELECT x0, y0, x1, y1, person_id, assigned FROM faces WHERE photo_id = ? AND person_id IS NOT NULL',
+                                             (pid,)).fetchall()
+                    rows = []
+                    for r in face_rows:
+                        best = max(old.get(r[0], []), key=lambda o: _iou(o[:4], r[1:5]), default=None)
+                        keep = best if best is not None and _iou(best[:4], r[1:5]) > 0.4 else (None, None, None, None, None, None)
+                        rows.append(r + (keep[4], keep[5]))
                     c.executemany('DELETE FROM faces WHERE photo_id = ?', [(pid,) for pid, _ in ims])
-                    c.executemany('INSERT INTO faces (photo_id, x0, y0, x1, y1, score, vec) VALUES (?, ?, ?, ?, ?, ?, ?)', face_rows)
+                    c.executemany('INSERT INTO faces (photo_id, x0, y0, x1, y1, score, vec, person_id, assigned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', rows)
                     nf += len(face_rows)
                 if vec_rows:
                     c.executemany('INSERT OR REPLACE INTO image_vectors (photo_id, model, vec) VALUES (?, ?, ?)', vec_rows)
@@ -454,6 +474,7 @@ class AI:
             job.post('ai', [pid for pid, _ in ims])
         if fm:
             n = suggest_people(self.cat)
+            self.cat.sync_person_tags()
             job.log('ok', f'{nf} faces found' + (f', {n} matched to people you have named' if n else ''))
         if caption: job.log('ok', f'{ncap} captions written')
         job.log('ok', f'AI done for {len(ids)} photos in {time.time() - t0:.0f} s')

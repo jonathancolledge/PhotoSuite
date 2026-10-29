@@ -141,6 +141,16 @@ def _exif_date(s):
     return None
 
 
+def exif_taken(tags):
+    """exifread tags -> (date taken, source). 'exif' is the capture time; 'datetime' is only the TIFF DateTime tag,
+    which editors set to when they wrote the file — a developed copy then takes its original's date instead."""
+    for k in ('EXIF DateTimeOriginal', 'Image DateTimeOriginal', 'EXIF DateTimeDigitized'):
+        d = _exif_date(_str(tags.get(k)))
+        if d: return d, 'exif'
+    d = _exif_date(_str(tags.get('Image DateTime')))
+    return (d, 'datetime') if d else (None, None)
+
+
 def camera_name(make, model):
     """'NIKON CORPORATION' + 'NIKON D810' -> 'NIKON D810'; 'FUJIFILM' + 'X-T3' -> 'FUJIFILM X-T3'."""
     make, model = (make or '').strip(), (model or '').strip()
@@ -193,11 +203,8 @@ def read_metadata(path, st=None):
     m['exposure'] = _num(g('EXIF ExposureTime', 'Image ExposureTime'))
     iso = _num(g('EXIF ISOSpeedRatings', 'Image ISOSpeedRatings', 'EXIF PhotographicSensitivity'))
     m['iso'] = int(iso) if iso else None
-    for k in ('EXIF DateTimeOriginal', 'Image DateTimeOriginal', 'EXIF DateTimeDigitized', 'Image DateTime'):
-        d = _exif_date(_str(tags.get(k)))
-        if d:
-            m['taken'], m['taken_src'] = d, 'exif'
-            break
+    m['taken'], m['taken_src'] = exif_taken(tags)
+    if is_raw and m['taken_src'] == 'datetime': m['taken_src'] = 'exif'   # a camera's own file: DateTime is the capture
     m['lat'], m['lon'], m['alt'] = _gps(tags)
     orientation = int(_num(tags.get('Image Orientation')) or 1)
 
@@ -376,6 +383,7 @@ def render_thumbnail(path, min_preview=1024, rawdemosaic_dir=None):
 # ───────────────────────────────────────────── the database
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS roots (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, added TEXT);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);   -- catalog upgrades done, etc.
 CREATE TABLE IF NOT EXISTS folders (path TEXT PRIMARY KEY COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS photos (
     id INTEGER PRIMARY KEY,
@@ -581,8 +589,65 @@ class Catalog:
                                                ext=os.path.splitext(fp)[1].lower(), added=now))
                 done += len(chunk)
                 job.progress(done / max(1, len(todo)), f'Reading EXIF {done}/{len(todo)}')
+        self._recheck_dates(root, job)
+        n = self.inherit_from_originals(root)
+        if n: job.log('info', f'{n} developed or exported file{"s take" if n != 1 else " takes"} the date and camera details of the original')
         need = [r['id'] for r in self.q('SELECT id FROM photos WHERE thumb = 0 AND missing = 0 AND ' + w, p)]
         return need
+
+    def _recheck_dates(self, root, job):
+        """Once per folder: catalogues made before 'datetime' existed counted the TIFF DateTime tag (when an editor
+        wrote the file) as the capture time. Re-read just the date of those non-RAW files; nothing else changes."""
+        key = 'dates-v2:' + os.path.normcase(root)
+        if self.q1('SELECT 1 FROM meta WHERE key = ?', (key,)): return
+        import exifread
+        w, p = _under('path', root)
+        rows = self.q(f"SELECT id, path FROM photos WHERE is_raw = 0 AND missing = 0 AND taken_src = 'exif' AND {w}", p)
+        fix = []
+        for i, r in enumerate(rows):
+            if i % 200 == 0: job.progress(i / max(1, len(rows)), f'Checking dates {i}/{len(rows)}')
+            try:
+                with open(r['path'], 'rb') as f:
+                    d, src = exif_taken(exifread.process_file(f, details=False) or {})
+            except Exception:
+                continue
+            if src == 'datetime': fix.append((r['id'],))
+        with self.tx() as c:
+            c.executemany("UPDATE photos SET taken_src = 'datetime' WHERE id = ?", fix)
+            c.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', (key, datetime.now().isoformat(' ', 'seconds')))
+
+    def inherit_from_originals(self, root):
+        """Developed or exported copies whose date is only the file's (RAW Demosaic's TIFFs, many editors' exports)
+        take the date, camera, lens, exposure and GPS of the original they were made from: the photo in the same
+        folder whose name theirs starts with, followed by nothing or a separator (_DSF7969_col1.tif and
+        _DSF7969.tif <- _DSF7969.RAF). Their own values win where they have them. Returns how many changed."""
+        w, p = _under('folder', root)
+        rows = self.q(f'SELECT id, folder, name, is_raw, taken_src FROM photos WHERE missing = 0 AND {w}', p)
+        folders = {}
+        for r in rows: folders.setdefault(os.path.normcase(r['folder']), []).append(r)
+        pairs = []
+        for items in folders.values():
+            # longest name first, so _DSF7969_col1 matches _DSF7969_col1.jpg before _DSF7969.RAF; RAW first on a tie
+            originals = sorted(((os.path.splitext(r['name'])[0].lower(), r['id'], r['is_raw']) for r in items if r['taken_src'] in ('exif', 'raw')),
+                               key=lambda t: (-len(t[0]), -t[2]))
+            for r in items:
+                if r['taken_src'] not in ('file', 'datetime', 'original'): continue
+                stem = os.path.splitext(r['name'])[0].lower()
+                src = next((oid for o, oid, _ in originals if oid != r['id'] and stem.startswith(o) and (len(stem) == len(o) or stem[len(o)] in '_- .(')), None)
+                if src: pairs.append((r['id'], src))
+        if not pairs: return 0
+        cols = ('make', 'model', 'camera', 'lens', 'focal', 'focal35', 'aperture', 'exposure', 'iso', 'lat', 'lon', 'alt')
+        src = self.rows(list({s for _, s in pairs}), 'id, taken, ' + ', '.join(cols))
+        dst = self.rows([d for d, _ in pairs], 'id, taken, ' + ', '.join(cols))
+        updates = []
+        for d, s in pairs:
+            a, b = dst[d], src[s]
+            vals = [a[c] if a[c] not in (None, '') else b[c] for c in cols]
+            if a['taken'] != b['taken'] or vals != [a[c] for c in cols]:
+                updates.append((b['taken'], *vals, d))
+        with self.tx() as c:
+            c.executemany(f"UPDATE photos SET taken = ?, taken_src = 'original', {', '.join(c_ + ' = ?' for c_ in cols)} WHERE id = ?", updates)
+        return len(updates)
 
     def make_thumbnails(self, ids, job, min_preview=1024, rawdemosaic_dir=None, threads=4):
         """Write the 128/512/1024 thumbnails for these photo ids (RCD runs one at a time: it uses every core)."""
@@ -721,7 +786,21 @@ class Catalog:
         with self.tx() as c:
             for n in names:
                 r = c.execute('SELECT id FROM tags WHERE name = ?', (n,)).fetchone()
-                if r: c.executemany('DELETE FROM photo_tags WHERE photo_id = ? AND tag_id = ?', [(i, r[0]) for i in ids])
+                if r: c.executemany("DELETE FROM photo_tags WHERE photo_id = ? AND tag_id = ? AND source != 'person'", [(i, r[0]) for i in ids])
+            c.execute('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM photo_tags)')
+
+    def sync_person_tags(self):
+        """Every photo is tagged with the people whose faces are in it (source 'person'), so names work like any tag: in
+        the tag list, the tag filter, keyword search and virtual folders. Named and suggested faces (marked ?) both
+        count, as in the Person filter; "Not this person" on the People tab takes a wrong one off. Rebuilt in full:
+        a few statements, even for many faces."""
+        named = "FROM faces f JOIN persons p ON p.id = f.person_id WHERE f.assigned IN ('user', 'auto')"
+        with self.tx() as c:
+            c.execute("DELETE FROM photo_tags WHERE source = 'person'")
+            c.execute(f'INSERT OR IGNORE INTO tags (name) SELECT DISTINCT p.name {named}')
+            # a tag you added yourself with the same name stays yours (the primary key keeps the first row)
+            c.execute("INSERT OR IGNORE INTO photo_tags (photo_id, tag_id, source) SELECT DISTINCT f.photo_id, t.id, 'person' "
+                      + named.replace('WHERE', 'JOIN tags t ON t.name = p.name WHERE'))
             c.execute('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM photo_tags)')
 
     def set_ai_tags(self, c, pid, names):
@@ -830,8 +909,12 @@ def where(spec, scope):
     if spec.get('date_to'): w.append('taken < ?'); p.append(spec['date_to'] + '~')
     if spec.get('gps') is True: w.append('lat IS NOT NULL')
     elif spec.get('gps') is False: w.append('lat IS NULL')
-    if spec.get('kind') == 'raw': w.append('is_raw = 1')
-    elif spec.get('kind') == 'image': w.append('is_raw = 0')
+    kind = spec.get('kind') or ''
+    if kind == 'raw': w.append('is_raw = 1')
+    elif kind == 'image': w.append('is_raw = 0')
+    elif kind.startswith('ext:'):   # one file type, e.g. 'ext:.tif,.tiff'
+        exts = [e for e in kind[4:].split(',') if e]
+        w.append(f'ext IN ({",".join("?" * len(exts))})'); p += exts
     if spec.get('person'):
         w.append('id IN (SELECT photo_id FROM faces WHERE person_id = ?)'); p.append(int(spec['person']))
     if spec.get('text'):
@@ -869,10 +952,35 @@ def describe(spec):
         if r and any(v is not None for v in r): bits.append(f'{u}{r[0] if r[0] is not None else ""}–{r[1] if r[1] is not None else ""}{" mm" if k == "focal" else " s" if k == "exposure" else ""}')
     if spec.get('date_from') or spec.get('date_to'): bits.append(f'{spec.get("date_from") or "…"} → {spec.get("date_to") or "…"}')
     if spec.get('gps') is not None: bits.append('with GPS' if spec['gps'] else 'no GPS')
-    if spec.get('kind'): bits.append('RAW' if spec['kind'] == 'raw' else 'not RAW')
+    if spec.get('kind'): bits.append(kind_label(spec['kind']))
     if spec.get('text'): bits.append(f'"{spec["text"]}"')
     if spec.get('person_name'): bits.append(spec['person_name'])
     return ', '.join(bits) or 'no filter'
+
+
+EXT_GROUPS = {'.jpeg': '.jpg', '.jfif': '.jpg', '.tiff': '.tif'}   # spellings of one format, filtered together
+EXT_NAMES = {'.jpg': 'JPEG', '.tif': 'TIFF', '.png': 'PNG', '.webp': 'WebP', '.bmp': 'BMP'}
+
+
+def file_types(exts):
+    """Catalogued extensions -> [(label, kind)] for the file-type filter: images first, then each RAW format."""
+    groups = {}
+    for e in exts:
+        e = e.lower()
+        groups.setdefault(EXT_GROUPS.get(e, e), set()).add(e)
+    out = []
+    for main in sorted(groups, key=lambda e: (e in RAW_EXTS, EXT_NAMES.get(e, e.upper()))):
+        out.append((kind_label('ext:' + ','.join(sorted(groups[main]))), 'ext:' + ','.join(sorted(groups[main]))))
+    return out
+
+
+def kind_label(kind):
+    if kind == 'raw': return 'RAW (any)'
+    if kind == 'image': return 'Not RAW'
+    exts = kind[4:].split(',') if kind.startswith('ext:') else [kind]
+    main = EXT_GROUPS.get(exts[0], exts[0])
+    name = EXT_NAMES.get(main, main.lstrip('.').upper())
+    return f'{name} ({", ".join(e.lstrip(".") for e in exts)})' if main not in RAW_EXTS else f'{name} (RAW)'
 
 
 def fmt_exposure(s):

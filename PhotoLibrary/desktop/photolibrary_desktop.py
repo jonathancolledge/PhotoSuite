@@ -49,7 +49,7 @@ RATING_FILTER = [('Any', None), ('Unrated', 'unrated'), ('1★ or more', 1), ('2
 THUMB_MODES = [('Embedded preview if 1024 px or more, else RCD', 1024), ('Embedded preview if 512 px or more, else RCD', 512),
                ('Any embedded preview, else RCD', 1), ('Always RCD demosaic', None)]
 GPS_FILTER = [('Any', None), ('With GPS', True), ('Without GPS', False)]
-KIND_FILTER = [('Any', None), ('RAW only', 'raw'), ('Not RAW', 'image')]
+KIND_FILTER = [('Any', None), ('RAW (any)', 'raw'), ('Not RAW', 'image')]   # + each catalogued file type
 SEARCH_MODES = ['Keywords', 'Meaning (AI)']
 
 
@@ -587,9 +587,11 @@ class App:
         self._tree_spec = object()
         self._filter_due = self._sel_due = None
         self._loading_filter = self._quiet_tree = self._desc_mixed = False
-        self._sel_rows, self._tag_names, self.vfilters = {}, [], []
+        self._sel_rows, self._tag_names, self._tag_people, self.vfilters = {}, [], set(), []
+        self.cat.sync_person_tags()   # names given before person tags existed, or by another copy of the app
         self.devices = [('cpu', 'CPU')]
         self.persons = {}
+        self.kind_filter = list(KIND_FILTER)
 
         self.ui_scale = max(1.0, root.winfo_fpixels('1i') / 96)
         root.title('Photo Library desktop')
@@ -897,7 +899,7 @@ class App:
         self._range_row(c, 'Shutter', *self.f_exp, hint='s')
         self._range_row(c, 'Date', *self.f_date)
         self._row(c, 'Location', lambda p: self._combo(p, self.f_gps, GPS_FILTER))
-        self._row(c, 'File type', lambda p: self._combo(p, self.f_kind, KIND_FILTER))
+        self.f_kind_box = self._row(c, 'File type', lambda p: self._combo(p, self.f_kind, KIND_FILTER))
         ttk.Label(c, text='Ranges: either end may be empty. Shutter as 1/250 or 2; dates as 2024-05-31 (or just 2024).',
                   style='Muted.TLabel', wraplength=int(290 * self.ui_scale), justify='left').pack(anchor='w', pady=(4, 0))
         self._button_row(c, [('Clear filter', self.clear_filter), ('Save as virtual folder…', self.save_virtual)])
@@ -1236,6 +1238,8 @@ class App:
         self.f_tagpick_box.configure(values=['(add a tag)'] + tags)
         self.f_camera_box.configure(values=[''] + self.cat.distinct('camera'))
         self.f_lens_box.configure(values=[''] + self.cat.distinct('lens'))
+        self.kind_filter = KIND_FILTER + L.file_types(self.cat.distinct('ext'))
+        self.f_kind_box.configure(values=[l for l, _ in self.kind_filter])
         self.persons = {r['name']: r['id'] for r in self.cat.q('SELECT id, name FROM persons ORDER BY name COLLATE NOCASE')}
         self.f_person_box.configure(values=[''] + list(self.persons))
         self.face_name_box.configure(values=list(self.persons))
@@ -1267,7 +1271,7 @@ class App:
         if d1: sp['date_to'] = d1
         g = key_of(GPS_FILTER, self.f_gps.get())
         if g is not None: sp['gps'] = g
-        k = key_of(KIND_FILTER, self.f_kind.get())
+        k = key_of(self.kind_filter, self.f_kind.get())
         if k: sp['kind'] = k
         if self.search_mode.get() == SEARCH_MODES[0] and self.search_var.get().strip():
             sp['text'] = self.search_var.get().strip()
@@ -1287,7 +1291,11 @@ class App:
                 lo.set('' if a is None else fmt(a)); hi.set('' if b is None else fmt(b))
             self.f_date[0].set(sp.get('date_from', '')); self.f_date[1].set(sp.get('date_to', ''))
             self.f_gps.set(label_of(GPS_FILTER, sp.get('gps')))
-            self.f_kind.set(label_of(KIND_FILTER, sp.get('kind')))
+            kind = sp.get('kind')
+            if kind and kind not in [v for _, v in self.kind_filter]:   # a saved filter's type no longer catalogued: still offer it
+                self.kind_filter.append((L.kind_label(kind), kind))
+                self.f_kind_box.configure(values=[l for l, _ in self.kind_filter])
+            self.f_kind.set(label_of(self.kind_filter, kind))
             if self.search_mode.get() == SEARCH_MODES[0]: self.search_var.set(sp.get('text', ''))
         finally:
             self._loading_filter = False
@@ -1521,7 +1529,8 @@ class App:
             if r is None: return
             self.sel_title.configure(text=r['name'])
             lines = [r['folder'], '']
-            lines.append(f'Taken {r["taken"] or "?"}' + (' (file date: no EXIF date)' if r['taken_src'] == 'file' else ''))
+            lines.append(f'Taken {r["taken"] or "?"}' + {'file': ' (file date: no EXIF date)', 'datetime': ' (when the file was written: no capture date)',
+                                                          'original': ' (from the original it was made from)'}.get(r['taken_src'], ''))
             gear = ' · '.join(x for x in (r['camera'], r['lens']) if x)
             if gear: lines.append(gear)
             exp = [L.fmt_exposure(r['exposure']), f'f/{r["aperture"]:g}' if r['aperture'] else '', f'ISO {r["iso"]}' if r['iso'] else '',
@@ -1560,9 +1569,12 @@ class App:
             else:
                 self._desc_mixed = True
                 self.desc_text.insert('1.0', '(different on these photos — saving sets them all to what is written here)')
+        self._tag_people = set()
         for name, cnt, src in self.cat.tag_counts(ids):
             self._tag_names.append(name)
-            self.tag_list.insert('end', f'{name}' + (f'   {cnt}/{n}' if n > 1 else '') + ('   · AI' if src == {'ai'} else ''))
+            if src == {'person'}: self._tag_people.add(name)
+            self.tag_list.insert('end', f'{name}' + (f'   {cnt}/{n}' if n > 1 else '') +
+                                 {frozenset({'ai'}): '   · AI', frozenset({'person'}): '   · person'}.get(frozenset(src), ''))
 
     def _paint_stars(self, r):
         for k, lb in enumerate(self.stars, 1):
@@ -1596,6 +1608,10 @@ class App:
         ids = self.grid.selected_ids()
         names = [self._tag_names[i] for i in self.tag_list.curselection()]
         if not ids or not names: return
+        people = [n for n in names if n in self._tag_people]
+        if people:
+            messagebox.showinfo(APP, f'{", ".join(people)}: a person\'s name comes from the faces named on the People tab. '
+                                     'To take it off a photo, select the face there and press "Not this person".')
         self.cat.remove_tags(ids, names)
         self.refresh_lists()
         self.selection_changed()
@@ -1833,6 +1849,8 @@ class App:
 
     # ─────────────────────────────── people
     def refresh_people(self):
+        self.cat.sync_person_tags()   # after every naming, confirming, renaming or "not this person"
+        self.selection_changed()
         self._people = self.cat.q('SELECT p.id, p.name, COUNT(f.id) AS n, SUM(f.assigned = \'auto\') AS auto FROM persons p '
                                   'LEFT JOIN faces f ON f.person_id = p.id GROUP BY p.id ORDER BY p.name COLLATE NOCASE')
         self.p_list.delete(0, 'end')
