@@ -23,6 +23,8 @@ from datetime import datetime
 import numpy as np
 from PIL import Image, ImageCms, ImageOps
 
+import focuspoints as FP
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_ROOT = os.path.dirname(HERE)
 DEFAULT_LIBRARY = os.path.join(APP_ROOT, 'library')
@@ -168,7 +170,7 @@ def read_metadata(path, st=None):
     is_raw = ext in RAW_EXTS
     m = dict(size=st.st_size, mtime=st.st_mtime, is_raw=int(is_raw), width=None, height=None, taken=None, taken_src=None,
              make='', model='', lens='', focal=None, focal35=None, aperture=None, exposure=None, iso=None,
-             lat=None, lon=None, alt=None)
+             lat=None, lon=None, alt=None, focus='')
     tags = {}
     try:
         with open(path, 'rb') as f:
@@ -184,7 +186,7 @@ def read_metadata(path, st=None):
                 try:
                     t = raw.extract_thumb()
                     if t.format == rawpy.ThumbFormat.JPEG:
-                        tags = exifread.process_file(io.BytesIO(t.data), details=False) or tags
+                        tags = exifread.process_file(io.BytesIO(t.data), details=True) or tags   # maker note: Fuji's focus point
                 except Exception:
                     pass
         except Exception:
@@ -208,9 +210,11 @@ def read_metadata(path, st=None):
     m['lat'], m['lon'], m['alt'] = _gps(tags)
     orientation = int(_num(tags.get('Image Orientation')) or 1)
 
+    flip = None
     if raw is not None:
         try:
             s = raw.sizes
+            flip = s.flip
             w, h = int(s.width), int(s.height)
             m['width'], m['height'] = (h, w) if s.flip in (5, 6) else (w, h)
             # rawpy's .other decodes the whole sensor image first (~0.1-0.9 s a file): only when EXIF left gaps
@@ -234,15 +238,20 @@ def read_metadata(path, st=None):
             pass
         finally:
             raw.close()
-        if not m['lens'] and 'NIKON' in m['make'].upper():   # no lens name, but the maker note has its focal and aperture range
+        notes = tags if 'FUJI' in m['make'].upper() else None   # the embedded JPEG's EXIF, read with its maker note
+        if 'NIKON' in m['make'].upper():   # the maker note: the focus point, and the lens's range when it has no name
             try:
                 with open(path, 'rb') as f:
-                    t = exifread.process_file(f, details=True).get('MakerNote LensMinMaxFocalMaxAperture')
+                    notes = exifread.process_file(f, details=True)
+                t = notes.get('MakerNote LensMinMaxFocalMaxAperture')
                 lo, hi, a0, a1 = (float(v) for v in t.values[:4])
-                if lo:
+                if lo and not m['lens']:
                     m['lens'] = (f'{lo:g}' + (f'-{hi:g}' if hi != lo else '') + f'mm f/{a0:g}' + (f'-{a1:g}' if a1 != a0 else ''))
             except Exception:
                 pass
+        if notes:
+            boxes = FP.from_tags(notes, m['make'], m['model'], {0: 1, 3: 3, 5: 8, 6: 6}.get(flip, orientation))
+            m['focus'] = FP.dumps(boxes) if boxes else ''
         if not m['make']:
             try:
                 E = engine()
@@ -403,6 +412,7 @@ CREATE TABLE IF NOT EXISTS photos (
     caption TEXT NOT NULL DEFAULT '',
     thumb INTEGER NOT NULL DEFAULT 0,      -- 0 to do, 1 done, -1 failed
     thumb_src TEXT,                        -- image | preview | rcd
+    focus TEXT,                            -- where the camera focused (focuspoints.py JSON); '' none, NULL not read yet
     ai INTEGER NOT NULL DEFAULT 0,         -- bits: 1 faces, 2 image embedding, 4 caption
     missing INTEGER NOT NULL DEFAULT 0,
     added TEXT
@@ -460,6 +470,8 @@ class Catalog:
             bad = c.execute("SELECT id, x0, y0, x1, y1 FROM faces WHERE typeof(x0) = 'blob'").fetchall()
             c.executemany('UPDATE faces SET x0 = ?, y0 = ?, x1 = ?, y1 = ? WHERE id = ?',
                           [tuple(float(np.frombuffer(v, np.float32)[0]) for v in r[1:]) + (r[0],) for r in bad])
+            if 'focus' not in {r[1] for r in c.execute('PRAGMA table_info(photos)')}:
+                c.execute('ALTER TABLE photos ADD COLUMN focus TEXT')   # catalogs made before focus points were read
             c.commit()
 
     def conn(self):
@@ -594,6 +606,7 @@ class Catalog:
         self._recheck_dates(root, job)
         n = self.inherit_from_originals(root)
         if n: job.log('info', f'{n} developed or exported file{"s take" if n != 1 else " takes"} the date and camera details of the original')
+        self._read_focus(root, job, threads)
         need = [r['id'] for r in self.q('SELECT id FROM photos WHERE thumb = 0 AND missing = 0 AND ' + w, p)]
         return need
 
@@ -617,6 +630,22 @@ class Catalog:
         with self.tx() as c:
             c.executemany("UPDATE photos SET taken_src = 'datetime' WHERE id = ?", fix)
             c.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', (key, datetime.now().isoformat(' ', 'seconds')))
+
+    def _read_focus(self, root, job, threads):
+        """RAW files catalogued before focus points were read: read just those (new files get them with their EXIF)."""
+        w, p = _under('path', root)
+        rows = self.q(f'SELECT id, path FROM photos WHERE is_raw = 1 AND missing = 0 AND focus IS NULL AND {w}', p)
+        found = 0
+        with ThreadPoolExecutor(threads) as ex:
+            for i in range(0, len(rows), 64):
+                job.check()
+                chunk = rows[i:i + 64]
+                res = list(ex.map(lambda r: _safe_focus(r['path']), chunk))
+                found += sum(1 for b in res if b)
+                with self.tx() as c:
+                    c.executemany('UPDATE photos SET focus = ? WHERE id = ?', [(b, r['id']) for r, b in zip(chunk, res)])
+                job.progress((i + len(chunk)) / len(rows), f'Reading focus points {i + len(chunk)}/{len(rows)}')
+        if found: job.log('info', f'focus points found in {found} of {len(rows)} RAW files')
 
     def inherit_from_originals(self, root):
         """Developed or exported copies whose date is only the file's (RAW Demosaic's TIFFs, many editors' exports)
@@ -833,16 +862,24 @@ class Catalog:
 
 UPSERT = '''
 INSERT INTO photos (path, folder, name, ext, is_raw, size, mtime, width, height, taken, taken_src, make, model, camera, lens,
-                    focal, focal35, aperture, exposure, iso, lat, lon, alt, added)
+                    focal, focal35, aperture, exposure, iso, lat, lon, alt, focus, added)
 VALUES (:path, :folder, :name, :ext, :is_raw, :size, :mtime, :width, :height, :taken, :taken_src, :make, :model, :camera, :lens,
-        :focal, :focal35, :aperture, :exposure, :iso, :lat, :lon, :alt, :added)
+        :focal, :focal35, :aperture, :exposure, :iso, :lat, :lon, :alt, :focus, :added)
 ON CONFLICT(path) DO UPDATE SET
     folder = excluded.folder, name = excluded.name, ext = excluded.ext, is_raw = excluded.is_raw, size = excluded.size,
     mtime = excluded.mtime, width = excluded.width, height = excluded.height, taken = excluded.taken, taken_src = excluded.taken_src,
     make = excluded.make, model = excluded.model, camera = excluded.camera, lens = excluded.lens, focal = excluded.focal,
     focal35 = excluded.focal35, aperture = excluded.aperture, exposure = excluded.exposure, iso = excluded.iso,
-    lat = excluded.lat, lon = excluded.lon, alt = excluded.alt, thumb = 0, ai = 0, missing = 0
+    lat = excluded.lat, lon = excluded.lon, alt = excluded.alt, focus = excluded.focus, thumb = 0, ai = 0, missing = 0
 '''
+
+
+def _safe_focus(path):
+    try:
+        boxes = FP.read(path)
+        return FP.dumps(boxes) if boxes else ''
+    except Exception:
+        return ''
 
 
 def _safe_meta(fp, st):
@@ -851,7 +888,8 @@ def _safe_meta(fp, st):
     except Exception:
         m = dict(size=st.st_size, mtime=st.st_mtime, is_raw=int(fp.lower().endswith(RAW_EXTS)), width=None, height=None,
                  taken=datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M:%S'), taken_src='file', make='', model='',
-                 camera='', lens='', focal=None, focal35=None, aperture=None, exposure=None, iso=None, lat=None, lon=None, alt=None)
+                 camera='', lens='', focal=None, focal35=None, aperture=None, exposure=None, iso=None, lat=None, lon=None, alt=None,
+                 focus=None)
         return m
 
 

@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
+import focuspoints as FP
 import rawdemosaic_engine as E
 import rawdemosaic_colour as CM
 
@@ -69,6 +70,7 @@ BOOST_STAGE = [('before', 'Before RAW denoise'), ('after', 'After RAW denoise')]
 SR_TARGETS = [('2', '×2'), ('4', '×4'), ('1', '×1 (same size: upscale, then back down)')]
 DOWNSCALE = [('lanczos', 'Lanczos-3'), ('box', 'Box (mean)')]
 RF_MODELS = E.BAYER_RF + E.XTRANS_RF
+FOCUS_STYLE = {'focus': ('#ff3b30', 2), 'af': (C['warn'], 1), 'face': (C['info'], 1)}   # colour, line width (as Photo Library)
 
 
 def fmt_mp(w, h):
@@ -85,9 +87,10 @@ def label_of(pairs, key):
 
 class Result:
     """A finished image held for viewing: an sRGB uint8 display copy (src: the input file; kind: blend/column)."""
-    def __init__(self, title, img, files=(), note='', src=None, kind='blend', quick=False, size=None):
+    def __init__(self, title, img, files=(), note='', src=None, kind='blend', quick=False, size=None, region=None):
         self.title, self.img, self.files, self.note = title, img, list(files), note
         self.src, self.kind, self.quick = src, kind, quick
+        self.region = region   # (y0, x0, h, w, H, W): the part of the unrotated H × W image this shows (a quick preview's crop)
         self.size = size or (img.shape[1], img.shape[0])   # the image's real size (the copy shown may be reduced)
 
     def label(self):
@@ -255,6 +258,8 @@ class App:
         CM.set_monitor(s.get('monitor', 'system'))   # every view is converted to the screen's colours
         self.files = []                          # input paths (Process tab)
         self.src_cache = {}                      # path -> RawFile / ImageInput (the last two)
+        self.focus_cache = {}                    # path -> (focus boxes in the sensor's frame, EXIF orientation); None while reading
+        self._view_focus = None                  # (path, rotated, region) of what the Process view shows
         self.results = []
         self.blend_files = []                    # [(path, weight)]
         self.session_tiffs = []                  # column TIFFs written this session
@@ -292,7 +297,7 @@ class App:
         s = self.settings
         zoomed = self.root.state() == 'zoomed'
         s.update(zoomed=zoomed, columns=self.columns, blend_mode=key_of(list(E.BLEND_MODES.items()), self.blend_mode.get(), 'mean'),
-                 out=self._collect_out(), models_dir=self.models_dir.get(), device=self.device_key())
+                 out=self._collect_out(), models_dir=self.models_dir.get(), device=self.device_key(), show_focus=self.show_focus.get())
         if not zoomed: s['geometry'] = self.root.geometry()
         try:
             with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
@@ -554,10 +559,13 @@ class App:
         self.result_list.bind('<<ListboxSelect>>', lambda e: self.root.after_idle(lambda: self._show_selected_result(keep_view=True)))
         self._button_row(c, [('Develop', self.develop_selected_result), ('Open folder', self.open_result_folder),
                              ('Column TIFFs → Blend files', self.send_to_blend), ('Discard', self.discard_result)])
+        self.show_focus = tk.BooleanVar(value=s.get('show_focus', False))
+        ttk.Checkbutton(c, text="Show where the camera focused (Nikon and Fujifilm RAW files)", variable=self.show_focus,
+                        style='Card.TCheckbutton', command=lambda: self.view.redraw()).pack(anchor='w', pady=(6, 0))
         pc = self._card(right, None, fill='both', expand=True)
         cv = tk.Canvas(pc, bg=C['checker'], highlightthickness=0)
         cv.pack(fill='both', expand=True)
-        self.view = ImageView(cv)
+        self.view = ImageView(cv, overlay=self._draw_focus)
         self.view.set_image(None, 'Add files, then Quick preview or Process. Wheel zooms, double-click toggles 100 %, drag pans.')
 
     def _build_column_editor(self, parent):
@@ -973,7 +981,43 @@ class App:
         if not sel or self.files[sel[0]] != path: return
         self.file_info.configure(text=txt)
         if thumb is not None and not self.busy:
+            self._view_focus = (path, kind != 'embedded preview', None)   # the quick RCD preview is rotated, the embedded one isn't
             self.view.set_image(thumb, f'{os.path.basename(path)} — {kind}' if not path.lower().endswith(E.IMAGE_EXTS) else os.path.basename(path))
+
+    # ─── the camera's focus point over the Process view
+    def _draw_focus(self, view):
+        if not self.show_focus.get() or view.img is None or not self._view_focus: return
+        path, rotated, region = self._view_focus
+        if path.lower().endswith(E.IMAGE_EXTS): return
+        if path not in self.focus_cache:   # read once, off the Tk thread (a NEF's maker note takes ~0.2 s)
+            self.focus_cache[path] = None
+            def work():
+                try: res = FP.read_unrotated(path)
+                except Exception: res = ([], 1)
+                self.q.put(('call', self._focus_read, path, res))
+            threading.Thread(target=work, daemon=True).start()
+        got = self.focus_cache.get(path)
+        if not got or not got[0]: return
+        boxes, o = got
+        if region:   # a quick preview shows only a crop: boxes as fractions of that crop, those outside it dropped
+            y0, x0, rh, rw, H, W = region
+            boxes = [[(bx * W - x0) / rw, (by * H - y0) / rh, bw * W / rw, bh * H / rh, k] for bx, by, bw, bh, k in boxes]
+            boxes = [b for b in boxes if 0 <= b[0] <= 1 and 0 <= b[1] <= 1]
+        h, w = view.img.shape[:2]
+        if o in (6, 8): o = o if h > w else 1   # turned a quarter: the shape says whether what's shown is rotated
+        elif not rotated: o = 1                 # an embedded preview is shown as stored
+        for bx, by, bw, bh, kind in FP.orient(boxes, o):
+            colour, width = FOCUS_STYLE.get(kind, FOCUS_STYLE['af'])
+            (x0, y0), (x1, y1) = view.to_canvas((bx - bw / 2) * w, (by - bh / 2) * h), view.to_canvas((bx + bw / 2) * w, (by + bh / 2) * h)
+            cx, cy, hw, hh = (x0 + x1) / 2, (y0 + y1) / 2, max(5, (x1 - x0) / 2), max(5, (y1 - y0) / 2)
+            if kind == 'focus':   # a dark outline under the red keeps it visible on bright and red subjects
+                view.cv.create_rectangle(cx - hw - 1, cy - hh - 1, cx + hw + 1, cy + hh + 1, outline='#000', width=width + 2)
+            view.cv.create_rectangle(cx - hw, cy - hh, cx + hw, cy + hh, outline=colour, width=width)
+
+    def _focus_read(self, path, res):
+        self.focus_cache[path] = res
+        while len(self.focus_cache) > 500: self.focus_cache.pop(next(iter(self.focus_cache)))
+        if self._view_focus and self._view_focus[0] == path: self.view.redraw()
 
     _src_lock = threading.Lock()
 
@@ -1156,18 +1200,20 @@ class App:
                 last = k == len(paths) - 1
                 self.q.put(('call', self._begin_file_results))
 
-                def on_column(ci, col, img, cfiles, name=name, last=last, p=p):
+                region = (*E.quick_region(src), src.H, src.W) if quick else None
+
+                def on_column(ci, col, img, cfiles, name=name, last=last, p=p, region=region):
                     size = (img.shape[1], img.shape[0])
                     if not last:   # earlier files: a reduced copy keeps RAM in check
                         f = max(1, -(-max(img.shape[:2]) // 2400)); img = np.ascontiguousarray(img[::f, ::f])
-                    self.q.put(('call', self._add_column_result, name, ci, col['name'], img, cfiles, quick, p, size))
+                    self.q.put(('call', self._add_column_result, name, ci, col['name'], img, cfiles, quick, p, size, region))
                 res = E.process(src, columns, opts, self.models, sub, quick=quick, on_column=on_column)
                 big = E.display_image(res['blend'], 0 if last else 2400)
                 size = (res['blend'].shape[1], res['blend'].shape[0])
                 if k == len(paths) - 1:
                     self.q.put(('call', self._to_develop, p, res, src, quick))
                 job.log('ok', f'{name}: {"preview" if quick else "done"} in {res["seconds"]:.1f} s' + (f' → {", ".join(os.path.basename(f) for f in res["files"])}' if res['files'] else ''))
-                self.q.put(('call', self._add_file_results, name, big, res['files'], quick, p, size))
+                self.q.put(('call', self._add_file_results, name, big, res['files'], quick, p, size, region))
                 res = None
                 done.append(p)
             return done
@@ -1176,18 +1222,19 @@ class App:
     def _begin_file_results(self):
         self._run_start = len(self.results)   # where this file's blend goes, above its columns
 
-    def _add_column_result(self, name, i, cname, img, files, quick, src, size):
+    def _add_column_result(self, name, i, cname, img, files, quick, src, size, region=None):
         tag = ' (quick preview)' if quick else ''
-        self.results.append(Result(f'{name}{tag} — column {i + 1}: {cname}', img, files, src=src, kind='column', quick=quick, size=size))
+        self.results.append(Result(f'{name}{tag} — column {i + 1}: {cname}', img, files, src=src, kind='column', quick=quick, size=size, region=region))
         self.session_tiffs += [f for f in files if f.endswith('.tif')]
         self.result_list.insert('end', self.results[-1].label())
         self.result_list.selection_clear(0, 'end'); self.result_list.selection_set('end'); self.result_list.see('end')
         self._show_selected_result(keep_view=True)
 
-    def _add_file_results(self, name, big, files, quick, src=None, size=None):
+    def _add_file_results(self, name, big, files, quick, src=None, size=None, region=None):
         tag = ' (quick preview)' if quick else ''
         start = min(getattr(self, '_run_start', len(self.results)), len(self.results))
-        self.results.insert(start, Result(f'{name}{tag} — blend', big, [f for f in files if '_col' not in os.path.basename(f)], src=src, quick=quick, size=size))
+        self.results.insert(start, Result(f'{name}{tag} — blend', big, [f for f in files if '_col' not in os.path.basename(f)], src=src, quick=quick,
+                                          size=size, region=region))
         self.result_list.insert(start, self.results[start].label())
         # keep RAM in check: older blends' full-size display copies are reduced
         for r in self.results[:start]:
@@ -1250,6 +1297,7 @@ class App:
         if not r: return
         # same size, give or take the pixel a reduced copy can differ by (blend box-averaged, columns strided)
         same = self.view.img is not None and all(abs(a - b) <= 2 for a, b in zip(self.view.img.shape[:2], r.img.shape[:2]))
+        self._view_focus = (r.src, True, r.region) if r.src else None
         self.view.set_image(r.img, r.title, keep_view=keep_view and same)
 
     def discard_result(self):

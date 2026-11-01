@@ -27,6 +27,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageTk
 
+import focuspoints as FP
 import photolibrary_ai as AI
 import photolibrary_catalog as L
 
@@ -44,6 +45,8 @@ C = dict(bg='#121417', card='#1d2025', card2='#252930', text='#e2e5ea', muted='#
          warn='#ffd98a', track='#2c3138', checker='#262a30', star_off='#3d434c')
 
 ZOOMS = [96, 128, 160, 200, 256, 320, 400, 512, 640, 800, 1024, 0]   # cell width; 0 = one photo filling the view
+FOCUS_MIN = 512    # focus points are drawn on photos shown bigger than this (px on the long side)
+FOCUS_STYLE = {'focus': ('#ff3b30', 2), 'af': (C['warn'], 1), 'face': (C['info'], 1)}   # colour, line width
 RATING_FILTER = [('Any', None), ('Unrated', 'unrated'), ('1★ or more', 1), ('2★ or more', 2), ('3★ or more', 3),
                  ('4★ or more', 4), ('5★', 5)]
 THUMB_MODES = [('Embedded preview if 1024 px or more, else RCD', 1024), ('Embedded preview if 512 px or more, else RCD', 512),
@@ -343,6 +346,8 @@ class PhotoGrid:
         if ph is not None:
             self.cache.move_to_end(key)
             cv.create_image(x + cw / 2, y + ih / 2, image=ph)
+            if row.get('focus') and self.app.show_focus.get() and max(ph.width(), ph.height()) > FOCUS_MIN:
+                self.draw_focus(FP.loads(row['focus']), x + (cw - ph.width()) / 2, y + (ih - ph.height()) / 2, ph.width(), ph.height())
         else:
             st = row.get('thumb', 0)
             msg = 'no preview' if st == -1 or key in self.failed else '' if key else 'making thumbnail…' if st == 0 else ''
@@ -371,6 +376,16 @@ class PhotoGrid:
         if i == self.focus and self.cv.focus_get() == self.cv:
             cv.create_rectangle(x + 3, y + 3, x + cw - 3, y + ch - 3, outline=C['muted'], dash=(2, 3))
         return key
+
+    def draw_focus(self, boxes, x0, y0, w, h):
+        """The camera's focus point(s), AF points and faces it found, over a photo drawn at x0, y0 and w × h."""
+        for bx, by, bw, bh, kind in boxes:
+            colour, width = FOCUS_STYLE.get(kind, FOCUS_STYLE['af'])
+            hw, hh = max(5, bw * w / 2), max(5, bh * h / 2)
+            cx, cy = x0 + bx * w, y0 + by * h
+            if kind == 'focus':   # a dark outline under the red keeps it visible on bright and red subjects
+                self.cv.create_rectangle(cx - hw - 1, cy - hh - 1, cx + hw + 1, cy + hh + 1, outline='#000', width=width + 2)
+            self.cv.create_rectangle(cx - hw, cy - hh, cx + hw, cy + hh, outline=colour, width=width)
 
     def got(self, key, im):
         if im is None:
@@ -628,7 +643,7 @@ class App:
                  rawdemosaic_dir=self.rd_dir.get().strip(), panostitch_dir=self.ps_dir.get().strip(), batch_settings=self.batch_json.get().strip(),
                  thumb_mode=key_of(THUMB_MODES, self.thumb_mode.get(), 1024), models_dir=self.models_dir.get().strip(),
                  device=self.device_key(), ai_faces=self.ai_faces.get(), ai_embed=self.ai_embed.get(), ai_caption=self.ai_caption.get(),
-                 ai_auto=self.ai_auto.get())
+                 ai_auto=self.ai_auto.get(), show_focus=self.show_focus.get())
         if not zoomed: s['geometry'] = self.root.geometry()
         try:
             with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
@@ -930,6 +945,9 @@ class App:
         ttk.Scale(bar, from_=0, to=len(ZOOMS) - 1, variable=self.zoom_var, orient='horizontal', length=int(150 * self.ui_scale),
                   command=lambda v: self.grid.set_zoom(round(float(v)))).pack(side='right', padx=(4, 4))
         ttk.Label(bar, text='Size', style='Card.TLabel').pack(side='right', padx=(12, 0))
+        self.show_focus = tk.BooleanVar(value=self.settings.get('show_focus', False))
+        ttk.Checkbutton(bar, text='Focus points', variable=self.show_focus, style='Card.TCheckbutton',
+                        command=lambda: self.grid.request_redraw()).pack(side='right')
         ttk.Label(bar, text='Sort', style='Card.TLabel').pack(side='left')
         sc = self._combo(bar, self.sort, list(L.SORTS), 11)
         sc.pack(side='left', padx=4)
@@ -1328,7 +1346,7 @@ class App:
         except Exception as ex:
             self.status.configure(text=f'Filter error: {ex}')
             return
-        rows = {k: dict(r) for k, r in self.cat.rows(ids, 'id, name, rating, is_raw, thumb, missing, taken').items()}
+        rows = {k: dict(r) for k, r in self.cat.rows(ids, 'id, name, rating, is_raw, thumb, missing, taken, focus').items()}
         self.grid.empty_text = ('Nothing matches.' if self.cat.roots() else
                                 'No photos yet.\n\nAdd folder… (top right) catalogues a folder and its subfolders.\nThe photos stay where they are.')
         self.grid.set_items(ids, rows, keep)

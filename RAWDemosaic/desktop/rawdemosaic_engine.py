@@ -691,6 +691,14 @@ class RawFile:
             return None
 
 
+def quick_region(src):
+    """The part of the (unrotated) image a quick preview processes: (y0, x0, height, width), a centre crop aligned
+    to the CFA period."""
+    W, H = src.W, src.H
+    tw, th = min(W, 1536), min(H, 1020)
+    return (H - th) // 2 // 6 * 6, (W - tw) // 2 // 6 * 6, th, tw
+
+
 def open_input(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in IMAGE_EXTS:
@@ -1445,12 +1453,7 @@ def process(src, columns, opts, models, job, quick=False, on_column=None):
     if not cols: raise ValueError('Enable at least one column with a weight above 0.')
     if src.is_rgb:
         for c in cols: c['rawDenoise'] = 'none'
-    region = None
-    if quick:   # centre crop, aligned to the CFA period
-        W, H = src.W, src.H
-        tw, th = min(W, 1536), min(H, 1020)
-        x0, y0 = (W - tw) // 2 // 6 * 6, (H - th) // 2 // 6 * 6
-        region = (y0, x0, th, tw)
+    region = quick_region(src) if quick else None
     src_c = _CropView(src, region) if region else src
     mosaic, cam_to_work = None, None
     if not src.is_rgb:
