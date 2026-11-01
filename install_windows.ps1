@@ -29,6 +29,8 @@ $Apps = @(
     @{ Name = 'PANOSTITCH'; Script = 'panoramamaker\desktop\panostitch_desktop.py'; Desc = 'Panorama stitcher' })
 $TorchIndex = 'https://download.pytorch.org/whl/cu130'
 $FallbackOrt = '1.26.0'     # last ONNX Runtime built for CUDA 12: works with older drivers (525+)
+$LegacyTorchIndex = 'https://download.pytorch.org/whl/cu126'   # CUDA 12.6: the last PyTorch build for GPUs older than the RTX 20 series
+$Legacy = $false
 
 function Say($t)  { Write-Host ''; Write-Host "==> $t" -ForegroundColor Yellow }
 function Ok($t)   { Write-Host "    OK  $t" -ForegroundColor Green }
@@ -101,7 +103,16 @@ if (-not $Cpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
         $Gpu = $true
         foreach ($r in $rows) { Ok "GPU $r" }
         $drv = [int](($rows | Select-Object -First 1).Split(',')[2].Trim().Split('.')[0])
-        if ($drv -lt 580) { Warn "driver $drv is older than 580: PyTorch's CUDA 13 build needs 580+ - update it from nvidia.com, or install with -Cpu" }
+        # the CUDA 13 builds stop at compute 7.5 (RTX 20 series): older cards (GTX 9xx/10xx, Titan V) need the CUDA 12 ones.
+        # Asked separately: drivers before ~510 don't know compute_cap (and are too old for CUDA 13 anyway)
+        $caps = & nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null
+        $caps = if ($LASTEXITCODE -eq 0) { foreach ($c in $caps) { try { [double]::Parse($c.Trim(), [Globalization.CultureInfo]::InvariantCulture) } catch { 9.9 } } } else { @(0) }
+        if (($caps | Measure-Object -Minimum).Minimum -lt 7.5) {
+            $Legacy = $true
+            $TorchIndex = $LegacyTorchIndex
+            Warn 'this GPU is older than the RTX 20 series - installing the CUDA 12 builds of PyTorch and ONNX Runtime, which still support it'
+            if ($drv -lt 528) { Warn "driver $drv is older than 528: the CUDA 12 builds need 528+ - update it from nvidia.com, or install with -Cpu" }
+        } elseif ($drv -lt 580) { Warn "driver $drv is older than 580: PyTorch's CUDA 13 build needs 580+ - update it from nvidia.com, or install with -Cpu" }
     }
 }
 if (-not $Gpu) { if ($Cpu) { Ok 'CPU only (-Cpu)' } else { Warn 'no NVIDIA GPU found - installing the CPU version (models will be slow)' } }
@@ -119,9 +130,21 @@ if (-not (Test-Path $VPy)) { & $Py -m venv $Venv; if ($LASTEXITCODE) { Fail 'cou
 function Pip { & $VPy -m pip @args --disable-pip-version-check; if ($LASTEXITCODE) { Fail "pip $($args -join ' ') failed (internet connection?)" } }
 Pip install --quiet --upgrade pip setuptools wheel
 Say 'Installing PyTorch (the first time this downloads ~3 GB with the GPU libraries - be patient)'
+$want = if (-not $Gpu) { 'cpu' } elseif ($Legacy) { 'cu126' } else { 'cu130' }
+# pip sees 2.x+cu130 as already satisfying "torch", so a build for a different CUDA has to be removed first
+$have = (& $VPy -c "import torch; print(torch.__version__.split('+')[-1])" 2>$null)
+if ($have -and $have.Trim() -ne $want) {
+    Warn "replacing the PyTorch build for $($have.Trim()) with the one for $want"
+    & $VPy -m pip uninstall --quiet -y torch torchvision 2>$null | Out-Null
+}
 if ($Gpu) { Pip install --quiet --upgrade torch torchvision --index-url $TorchIndex }
 else { Pip install --quiet --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cpu }
 Ok (& $VPy -c "import torch; print('PyTorch', torch.__version__, '- CUDA' if torch.cuda.is_available() else '- CPU')")
+if ($Gpu) {
+    & $VPy -c "import torch; a = torch.rand(256, 256, device='cuda'); (a @ a).sum().item()" *> $null
+    if ($LASTEXITCODE) { Warn 'PyTorch can''t run on this GPU - the apps will use the CPU for PyTorch models (update the NVIDIA driver, then run this again)' }
+    else { Ok 'PyTorch runs on the GPU' }
+}
 Say 'Installing the other packages'
 Pip install --quiet --upgrade -r (Join-Path $Here 'requirements.txt')
 $env:SAM2_BUILD_CUDA = '0'       # SAM2's optional CUDA extension needs a compiler; it runs fine without it
@@ -139,12 +162,17 @@ import torch
 import onnxruntime as o
 try: o.preload_dlls()
 except Exception: pass
+import numpy as np
 models = sorted(glob.glob(os.path.join(sys.argv[1], 'models', 'panoramamaker', 'raco_aliked_lightglue_pipeline_k*.onnx')))
+faces = os.path.join(sys.argv[1], 'models', 'PhotoLibrary', 'buffalo_l', 'det_10g.onnx')
 if models:
-    import numpy as np
     s = o.InferenceSession(models[0], providers=['CUDAExecutionProvider'])
     assert s.get_providers()[0] == 'CUDAExecutionProvider', 'CUDA not used'
     s.run(None, {'images': np.random.rand(2, 3, 256, 384).astype(np.float32)})
+elif os.path.exists(faces):
+    s = o.InferenceSession(faces, providers=['CUDAExecutionProvider'])   # creating it is where cuBLAS rejects an unsupported GPU
+    assert s.get_providers()[0] == 'CUDAExecutionProvider', 'CUDA not used'
+    s.run(None, {s.get_inputs()[0].name: np.random.rand(1, 3, 640, 640).astype(np.float32)})
 else:
     assert 'CUDAExecutionProvider' in o.get_available_providers()
 '@
@@ -158,7 +186,8 @@ function Get-OrtVersion { (& $VPy -c "import onnxruntime as o; print(o.__version
 if ($Gpu) {
     & $VPy -m pip uninstall --quiet -y onnxruntime 2>$null | Out-Null       # the CPU build would hide the GPU one
     # with its own CUDA and cuDNN packages: PANOSTITCH runs ONNX Runtime without importing torch (whose DLLs it could borrow)
-    Pip install --quiet --upgrade "onnxruntime-gpu[cuda,cudnn]"
+    if ($Legacy) { Pip install --quiet "onnxruntime-gpu[cuda,cudnn]==$FallbackOrt" }   # the CUDA 13 builds' cuBLAS rejects older GPUs
+    else { Pip install --quiet --upgrade "onnxruntime-gpu[cuda,cudnn]" }
     if (Test-Gpu) {
         Ok ("ONNX Runtime " + (Get-OrtVersion) + " (GPU)")
     } else {

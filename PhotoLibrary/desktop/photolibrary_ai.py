@@ -18,6 +18,7 @@ import json
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 
 import numpy as np
@@ -32,16 +33,42 @@ FACE_MATCH = 0.45      # ArcFace cosine: suggest the same person above this
 FACE_GROUP = 0.50      # group unnamed faces above this
 
 
+def _torch_supports(i):
+    """Was the installed PyTorch built for GPU i? CUDA 13 builds stop at the RTX 20 series (compute 7.5): older cards
+    (GTX 10xx, Titan V …) need the CUDA 12.6 build, which install_windows.bat picks for them."""
+    import torch
+    major, minor = torch.cuda.get_device_capability(i)
+    archs = [a.split('_')[1] for a in torch.cuda.get_arch_list() if a.startswith('sm_')]
+    return any(int(a[:-1]) == major and int(a[-1]) <= minor for a in archs)   # sm_80 code runs on 8.6, not on 7.x
+
+
 def list_devices():
     out = []
     try:
         import torch
         for i in range(torch.cuda.device_count()):
             p = torch.cuda.get_device_properties(i)
-            out.append((f'cuda:{i}', f'cuda:{i} — {p.name} ({p.total_memory / 2 ** 30:.0f} GB)'))
+            note = '' if _torch_supports(i) else ' — too old for this install, runs on the CPU'
+            out.append((f'cuda:{i}', f'cuda:{i} — {p.name} ({p.total_memory / 2 ** 30:.0f} GB){note}'))
     except Exception:
         pass
     return out + [('cpu', 'CPU')]
+
+
+def usable_device(device):
+    """(device to use, why the GPU isn't used or '') — the CPU when the chosen GPU can't run this install's PyTorch."""
+    if not device.startswith('cuda'): return device, ''
+    try:
+        import torch
+        if not torch.cuda.is_available(): return 'cpu', 'PyTorch has no CUDA here'
+        i = int(device.split(':')[1] or 0)
+        if not _torch_supports(i):
+            major, minor = torch.cuda.get_device_capability(i)
+            return 'cpu', (f'{torch.cuda.get_device_name(i)} (compute {major}.{minor}) is too old for PyTorch {torch.__version__} — '
+                           'run install_windows.bat again to get the build for older GPUs')
+    except Exception as ex:
+        return 'cpu', str(ex)
+    return device, ''
 
 
 def _ort_providers(device):
@@ -99,9 +126,16 @@ def _nms(boxes, scores, thr):
 class FaceModel:
     def __init__(self, folder, device):
         import onnxruntime as ort
-        prov = _ort_providers(device)
-        self.det = ort.InferenceSession(os.path.join(folder, 'det_10g.onnx'), providers=prov)
-        self.rec = ort.InferenceSession(os.path.join(folder, 'w600k_r50.onnx'), providers=prov)
+        prov, self.gpu_error = _ort_providers(device), ''
+        try:
+            self.det = ort.InferenceSession(os.path.join(folder, 'det_10g.onnx'), providers=prov)
+            self.rec = ort.InferenceSession(os.path.join(folder, 'w600k_r50.onnx'), providers=prov)
+        except Exception as ex:
+            if prov == ['CPUExecutionProvider']: raise
+            # e.g. "CUBLAS failure 8": this ONNX Runtime's CUDA build doesn't support the GPU — the CPU still works
+            self.gpu_error = str(ex).strip().splitlines()[-1][:300]
+            self.det = ort.InferenceSession(os.path.join(folder, 'det_10g.onnx'), providers=['CPUExecutionProvider'])
+            self.rec = ort.InferenceSession(os.path.join(folder, 'w600k_r50.onnx'), providers=['CPUExecutionProvider'])
         self.det_in, self.rec_in = self.det.get_inputs()[0].name, self.rec.get_inputs()[0].name
         self.on_gpu = 'CUDAExecutionProvider' in self.det.get_providers()
 
@@ -405,13 +439,14 @@ class AI:
             t0 = time.time()
             if part == 'faces' and self.faces is None:
                 self.faces = FaceModel(os.path.join(self.models_dir, 'buffalo_l'), self.device)
+                if job and self.faces.gpu_error: job.log('warn', f'face models can\'t use the GPU, using the CPU ({self.faces.gpu_error})')
                 if job: job.log('info', f'face models loaded ({"GPU" if self.faces.on_gpu else "CPU"}, {time.time() - t0:.1f} s)')
-            elif part == 'siglip' and self.siglip is None:
-                self.siglip = SigLIP(os.path.join(self.models_dir, 'siglip2'), self.device)
-                if job: job.log('info', f'SigLIP2 loaded on {self.device} ({time.time() - t0:.1f} s)')
-            elif part == 'florence' and self.florence is None:
-                self.florence = Florence(os.path.join(self.models_dir, 'florence2'), self.device)
-                if job: job.log('info', f'Florence-2 loaded on {self.device} ({time.time() - t0:.1f} s)')
+            elif part in ('siglip', 'florence') and getattr(self, part) is None:
+                cls, name = (SigLIP, 'SigLIP2') if part == 'siglip' else (Florence, 'Florence-2')
+                dev, why = usable_device(self.device)
+                if job and why: job.log('warn', f'{name} runs on the CPU: {why}')
+                setattr(self, part, cls(os.path.join(self.models_dir, SM.PARTS[part]), dev))
+                if job: job.log('info', f'{name} loaded on {dev} ({time.time() - t0:.1f} s)')
         return getattr(self, part)
 
     def _thumb(self, pid):
@@ -427,57 +462,64 @@ class AI:
         sg = self._need('siglip', job) if embed else None
         fl = self._need('florence', job) if caption else None
         t0, nf, ncap = time.time(), 0, 0
-        for i in range(0, len(ids), batch):
-            job.check()
-            part = ids[i:i + batch]
-            ims = [(pid, self._thumb(pid)) for pid in part]
-            ims = [(pid, im) for pid, im in ims if im is not None]
-            if not ims: continue
-            face_rows, vec_rows, caps = [], [], []
-            if fm:
-                for pid, im in ims:
-                    a = np.asarray(im)
-                    h, w = a.shape[:2]
-                    for box, score, kps in fm.detect(a):
-                        v = fm.embed(a, kps)
-                        x0, y0, x1, y1 = (float(t) for t in box)   # numpy scalars would be stored as BLOBs
-                        face_rows.append((pid, max(0.0, x0 / w), max(0.0, y0 / h), min(1.0, x1 / w), min(1.0, y1 / h), score, v.tobytes()))
-            if sg:
-                vecs = sg.images([im for _, im in ims])
-                vec_rows = [(pid, sg.name, v.astype(np.float16).tobytes()) for (pid, _), v in zip(ims, vecs)]
-            if fl:
-                caps = list(zip([pid for pid, _ in ims], fl.captions([im for _, im in ims])))
-            with self.cat.tx() as c:
-                if fm:
-                    # faces found again keep who they are: the old face that overlaps a new one most hands over its name
-                    old = {}
-                    for pid, _ in ims:
-                        old[pid] = c.execute('SELECT x0, y0, x1, y1, person_id, assigned FROM faces WHERE photo_id = ? AND person_id IS NOT NULL',
-                                             (pid,)).fetchall()
-                    rows = []
-                    for r in face_rows:
-                        best = max(old.get(r[0], []), key=lambda o: _iou(o[:4], r[1:5]), default=None)
-                        keep = best if best is not None and _iou(best[:4], r[1:5]) > 0.4 else (None, None, None, None, None, None)
-                        rows.append(r + (keep[4], keep[5]))
-                    c.executemany('DELETE FROM faces WHERE photo_id = ?', [(pid,) for pid, _ in ims])
-                    c.executemany('INSERT INTO faces (photo_id, x0, y0, x1, y1, score, vec, person_id, assigned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', rows)
-                    nf += len(face_rows)
-                if vec_rows:
-                    c.executemany('INSERT OR REPLACE INTO image_vectors (photo_id, model, vec) VALUES (?, ?, ?)', vec_rows)
-                for pid, cap in caps:
-                    c.execute('UPDATE photos SET caption = ? WHERE id = ?', (cap, pid))
-                    self.cat.set_ai_tags(c, pid, caption_tags(cap))
-                    ncap += 1
-                c.executemany('UPDATE photos SET ai = ai | ? WHERE id = ?', [(want, pid) for pid, _ in ims])
-            done = min(len(ids), i + batch)
-            job.progress(done / len(ids), f'AI {done}/{len(ids)}{L._eta(t0, done, len(ids))}')
-            job.post('ai', [pid for pid, _ in ims])
+        load = lambda part: [(pid, im) for pid, im in ((pid, self._thumb(pid)) for pid in part) if im is not None]
+        # the next batch's thumbnails load on a second thread while the models work on this one
+        with ThreadPoolExecutor(1) as pre:
+            nxt = pre.submit(load, ids[:batch])
+            for i in range(0, len(ids), batch):
+                job.check()
+                ims = nxt.result()
+                if i + batch < len(ids): nxt = pre.submit(load, ids[i + batch:i + 2 * batch])
+                if ims: nf, ncap = self._run_batch(ims, want, fm, sg, fl, job, nf, ncap)
+                done = min(len(ids), i + batch)
+                job.progress(done / len(ids), f'AI {done}/{len(ids)}{L._eta(t0, done, len(ids))}')
         if fm:
             n = suggest_people(self.cat)
             self.cat.sync_person_tags()
             job.log('ok', f'{nf} faces found' + (f', {n} matched to people you have named' if n else ''))
         if caption: job.log('ok', f'{ncap} captions written')
         job.log('ok', f'AI done for {len(ids)} photos in {time.time() - t0:.0f} s')
+
+    def _run_batch(self, ims, want, fm, sg, fl, job, nf, ncap):
+        """One batch of (photo id, image) through the chosen models, saved in one transaction."""
+        face_rows, vec_rows, caps = [], [], []
+        if fm:
+            for pid, im in ims:
+                a = np.asarray(im)
+                h, w = a.shape[:2]
+                for box, score, kps in fm.detect(a):
+                    v = fm.embed(a, kps)
+                    x0, y0, x1, y1 = (float(t) for t in box)   # numpy scalars would be stored as BLOBs
+                    face_rows.append((pid, max(0.0, x0 / w), max(0.0, y0 / h), min(1.0, x1 / w), min(1.0, y1 / h), score, v.tobytes()))
+        if sg:
+            vecs = sg.images([im for _, im in ims])
+            vec_rows = [(pid, sg.name, v.astype(np.float16).tobytes()) for (pid, _), v in zip(ims, vecs)]
+        if fl:
+            caps = list(zip([pid for pid, _ in ims], fl.captions([im for _, im in ims])))
+        with self.cat.tx() as c:
+            if fm:
+                # faces found again keep who they are: the old face that overlaps a new one most hands over its name
+                old = {}
+                for pid, _ in ims:
+                    old[pid] = c.execute('SELECT x0, y0, x1, y1, person_id, assigned FROM faces WHERE photo_id = ? AND person_id IS NOT NULL',
+                                         (pid,)).fetchall()
+                rows = []
+                for r in face_rows:
+                    best = max(old.get(r[0], []), key=lambda o: _iou(o[:4], r[1:5]), default=None)
+                    keep = best if best is not None and _iou(best[:4], r[1:5]) > 0.4 else (None, None, None, None, None, None)
+                    rows.append(r + (keep[4], keep[5]))
+                c.executemany('DELETE FROM faces WHERE photo_id = ?', [(pid,) for pid, _ in ims])
+                c.executemany('INSERT INTO faces (photo_id, x0, y0, x1, y1, score, vec, person_id, assigned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', rows)
+                nf += len(face_rows)
+            if vec_rows:
+                c.executemany('INSERT OR REPLACE INTO image_vectors (photo_id, model, vec) VALUES (?, ?, ?)', vec_rows)
+            for pid, cap in caps:
+                c.execute('UPDATE photos SET caption = ? WHERE id = ?', (cap, pid))
+                self.cat.set_ai_tags(c, pid, caption_tags(cap))
+                ncap += 1
+            c.executemany('UPDATE photos SET ai = ai | ? WHERE id = ?', [(want, pid) for pid, _ in ims])
+        job.post('ai', [pid for pid, _ in ims])
+        return nf, ncap
 
     def search_text(self, text, job=None, top=300, min_prob=1e-3):
         sg = self._need('siglip', job)

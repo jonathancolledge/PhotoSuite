@@ -86,11 +86,19 @@ ok "tkinter $("$PY" -c 'import tkinter; print(tkinter.TkVersion)')"
 
 say "Looking for an NVIDIA GPU"
 GPU=no
+LEGACY=no
 if [ "$MODE" != cpu ] && command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
   GPU=yes
   nvidia-smi --query-gpu=index,name,driver_version --format=csv,noheader | while IFS= read -r l; do ok "GPU $l"; done
   DRV="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | cut -d. -f1)"
-  if [ "${DRV:-0}" -lt 580 ]; then
+  # the CUDA 13 builds stop at compute 7.5 (RTX 20 series): older cards (GTX 9xx/10xx, Titan V) need the CUDA 12 ones.
+  # Asked separately: drivers before ~510 don't know compute_cap (and are too old for CUDA 13 anyway)
+  CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | sort -n | head -1 | tr -d ' ')"
+  if [ -z "$CAP" ] || awk "BEGIN { exit !($CAP < 7.5) }"; then
+    LEGACY=yes
+    warn "this GPU is older than the RTX 20 series — installing the CUDA 12 builds of PyTorch and ONNX Runtime, which still support it"
+    [ "${DRV:-0}" -lt 525 ] && warn "driver $DRV is older than 525: the CUDA 12 builds need 525+ — update the driver, or use --cpu"
+  elif [ "${DRV:-0}" -lt 580 ]; then
     warn "driver $DRV is older than 580 (CUDA 13): the GPU packages may not load — update the driver, or use --cpu"
   fi
 else
@@ -103,12 +111,23 @@ VPY="$VENV/bin/python"
 "$VPY" -m pip install --upgrade --quiet pip setuptools wheel
 
 say "Installing PyTorch (the first time this downloads ~3 GB with the GPU libraries)"
+WANT=cpu; [ "$GPU" = yes ] && WANT=cu130; [ "$LEGACY" = yes ] && WANT=cu126   # cu126: the last build for pre-RTX 20 GPUs
+# pip sees 2.x+cu130 as already satisfying "torch", so a build for a different CUDA has to be removed first
+HAVE="$("$VPY" -c "import torch; print(torch.__version__.split('+')[-1])" 2>/dev/null || true)"
+if [ -n "$HAVE" ] && [ "$HAVE" != "$WANT" ]; then
+  warn "replacing the PyTorch build for $HAVE with the one for $WANT"
+  "$VPY" -m pip uninstall --quiet -y torch torchvision >/dev/null 2>&1 || true
+fi
 if [ "$GPU" = yes ]; then
-  "$VPY" -m pip install --upgrade --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu130
+  "$VPY" -m pip install --upgrade --quiet torch torchvision --index-url "https://download.pytorch.org/whl/$WANT"
 else
   "$VPY" -m pip install --upgrade --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
 fi
 ok "$("$VPY" -c "import torch; print('PyTorch', torch.__version__, '- CUDA' if torch.cuda.is_available() else '- CPU')")"
+if [ "$GPU" = yes ]; then
+  if "$VPY" -c "import torch; a = torch.rand(256, 256, device='cuda'); (a @ a).sum().item()" >/dev/null 2>&1; then ok "PyTorch runs on the GPU"
+  else warn "PyTorch can't run on this GPU — the apps will use the CPU for PyTorch models (update the NVIDIA driver, then run this again)"; fi
+fi
 
 say "Installing the other packages"
 "$VPY" -m pip install --upgrade --quiet -r "$HERE/requirements.txt"
@@ -134,18 +153,24 @@ o.preload_dlls()
 cap = os.path.join(os.path.dirname(o.__file__), 'capi')
 ctypes.CDLL(os.path.join(cap, 'libonnxruntime_providers_shared.so'), mode=ctypes.RTLD_GLOBAL)
 ctypes.CDLL(os.path.join(cap, 'libonnxruntime_providers_cuda.so'))
+import numpy as np
 models = sorted(glob.glob(os.path.join(sys.argv[1], 'models', 'panoramamaker', 'raco_aliked_lightglue_pipeline_k*.onnx')))
+faces = os.path.join(sys.argv[1], 'models', 'PhotoLibrary', 'buffalo_l', 'det_10g.onnx')
 if models:
-    import numpy as np
     s = o.InferenceSession(models[0], providers=['CUDAExecutionProvider'])
     assert s.get_providers()[0] == 'CUDAExecutionProvider'
     s.run(None, {'images': np.random.rand(2, 3, 256, 384).astype(np.float32)})
+elif os.path.exists(faces):
+    s = o.InferenceSession(faces, providers=['CUDAExecutionProvider'])   # creating it is where cuBLAS rejects an unsupported GPU
+    assert s.get_providers()[0] == 'CUDAExecutionProvider'
+    s.run(None, {s.get_inputs()[0].name: np.random.rand(1, 3, 640, 640).astype(np.float32)})
 EOF
 }
 FALLBACK_ORT=1.26.0      # last release built for CUDA 12 — works where the CUDA 13 builds crash
 if [ "$GPU" = yes ]; then
   "$VPY" -m pip uninstall --quiet -y onnxruntime >/dev/null 2>&1 || true      # the CPU build would shadow the GPU one
-  "$VPY" -m pip install --upgrade --quiet "onnxruntime-gpu[cuda,cudnn]"
+  if [ "$LEGACY" = yes ]; then "$VPY" -m pip install --quiet "onnxruntime-gpu[cuda,cudnn]==$FALLBACK_ORT"   # CUDA 13's cuBLAS rejects older GPUs
+  else "$VPY" -m pip install --upgrade --quiet "onnxruntime-gpu[cuda,cudnn]"; fi
   if probe_gpu; then
     ok "ONNX Runtime $("$VPY" -c 'import onnxruntime as o; print(o.__version__)') (GPU)"
   else

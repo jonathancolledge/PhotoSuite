@@ -175,7 +175,7 @@ def read_metadata(path, st=None):
             tags = exifread.process_file(f, details=False) or {}
     except Exception:
         tags = {}
-    raw = None
+    raw, exif_ok = None, len(tags) >= 5
     if is_raw:
         try:
             import rawpy
@@ -213,16 +213,18 @@ def read_metadata(path, st=None):
             s = raw.sizes
             w, h = int(s.width), int(s.height)
             m['width'], m['height'] = (h, w) if s.flip in (5, 6) else (w, h)
-            o = raw.other
-            if not m['iso'] and o.iso_speed: m['iso'] = int(o.iso_speed)
-            if not m['exposure'] and o.shutter_speed: m['exposure'] = float(o.shutter_speed)
-            if not m['aperture'] and o.aperture: m['aperture'] = round(float(o.aperture), 1)
-            if not m['focal'] and o.focal_length: m['focal'] = float(o.focal_length)
-            if not m['taken'] and o.timestamp:
-                ts = o.timestamp
-                ts = ts if isinstance(ts, datetime) else datetime.fromtimestamp(float(ts))
-                if ts.year > 1970: m['taken'], m['taken_src'] = ts.strftime('%Y-%m-%d %H:%M:%S'), 'raw'
-            if not m['lens']:
+            # rawpy's .other decodes the whole sensor image first (~0.1-0.9 s a file): only when EXIF left gaps
+            if not all(m[k] for k in ('iso', 'exposure', 'aperture', 'focal', 'taken')):
+                o = raw.other
+                if not m['iso'] and o.iso_speed: m['iso'] = int(o.iso_speed)
+                if not m['exposure'] and o.shutter_speed: m['exposure'] = float(o.shutter_speed)
+                if not m['aperture'] and o.aperture: m['aperture'] = round(float(o.aperture), 1)
+                if not m['focal'] and o.focal_length: m['focal'] = float(o.focal_length)
+                if not m['taken'] and o.timestamp:
+                    ts = o.timestamp
+                    ts = ts if isinstance(ts, datetime) else datetime.fromtimestamp(float(ts))
+                    if ts.year > 1970: m['taken'], m['taken_src'] = ts.strftime('%Y-%m-%d %H:%M:%S'), 'raw'
+            if not m['lens'] and not exif_ok:   # .lens decodes the image too, and finds no more than EXIF did
                 ln = raw.lens
                 m['lens'] = (ln.model or '').strip()
                 if not m['lens'] and ln.min_focal:
@@ -232,7 +234,7 @@ def read_metadata(path, st=None):
             pass
         finally:
             raw.close()
-        if not m['lens'] and is_raw:   # Nikon: no lens name, but the maker note has its focal and aperture range
+        if not m['lens'] and 'NIKON' in m['make'].upper():   # no lens name, but the maker note has its focal and aperture range
             try:
                 with open(path, 'rb') as f:
                     t = exifread.process_file(f, details=True).get('MakerNote LensMinMaxFocalMaxAperture')
@@ -649,9 +651,10 @@ class Catalog:
             c.executemany(f"UPDATE photos SET taken = ?, taken_src = 'original', {', '.join(c_ + ' = ?' for c_ in cols)} WHERE id = ?", updates)
         return len(updates)
 
-    def make_thumbnails(self, ids, job, min_preview=1024, rawdemosaic_dir=None, threads=4):
+    def make_thumbnails(self, ids, job, min_preview=1024, rawdemosaic_dir=None, threads=None):
         """Write the 128/512/1024 thumbnails for these photo ids (RCD runs one at a time: it uses every core)."""
         if not ids: return
+        threads = threads or max(2, min(20, (os.cpu_count() or 4) - 2))   # Pillow's decode and resize release the GIL
         rows = self.rows(ids, 'id, path, is_raw')
         ids = [i for i in ids if i in rows]
         rcd_lock, count_lock = threading.Lock(), threading.Lock()
