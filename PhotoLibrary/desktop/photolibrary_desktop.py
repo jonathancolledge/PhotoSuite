@@ -1026,7 +1026,9 @@ class App:
         c = self._card(left, 'People')
         self.p_list = self._scrolled_listbox(c, 10)
         self.p_list.bind('<<ListboxSelect>>', lambda e: self._people_selected('person'))
+        self.p_list.bind('<Button-3>', self._person_menu)
         self._button_row(c, [('Rename…', self.rename_person), ('Show their photos', self.person_photos)])
+        self._button_row(c, [('Share names…', self.export_people), ('Import shared…', self.import_people)], pady=(4, 0))
         c = self._card(left, 'Unnamed faces')
         ttk.Label(c, text='Faces found by the AI that nobody has named. Group similar faces, pick a group, select the\n'
                           'faces of one person and name them; other faces like them are then suggested (marked ?).',
@@ -1926,7 +1928,8 @@ class App:
         if allowed is None:
             self.face_filter_lbl.configure(text='Tick to see only the faces in photos you have filtered on the Library tab '
                                                 '(by date, camera, tags, folder …) — then name them in bulk.')
-            self._people = self.cat.q('SELECT p.id, p.name, COUNT(f.id) AS n, SUM(f.assigned = \'auto\') AS auto FROM persons p '
+            self._people = self.cat.q('SELECT p.id, p.name, COUNT(f.id) AS n, SUM(f.assigned = \'auto\') AS auto, '
+                                      '(SELECT COUNT(*) FROM person_refs r WHERE r.person_id = p.id) AS shared FROM persons p '
                                       'LEFT JOIN faces f ON f.person_id = p.id GROUP BY p.id ORDER BY p.name COLLATE NOCASE')
             n_un = self.cat.q1('SELECT COUNT(*) FROM faces WHERE person_id IS NULL')[0]
             self._groups = [(None, n_un)] + [(r[0], r[1]) for r in self.cat.q(
@@ -1942,12 +1945,13 @@ class App:
                     if cluster is not None: groups[cluster] += 1
                 else:
                     n[pid] += 1; auto[pid] += assigned == 'auto'
-            self._people = [{'id': r['id'], 'name': r['name'], 'n': n[r['id']], 'auto': auto[r['id']]}
+            self._people = [{'id': r['id'], 'name': r['name'], 'n': n[r['id']], 'auto': auto[r['id']], 'shared': 0}
                             for r in self.cat.q('SELECT id, name FROM persons ORDER BY name COLLATE NOCASE') if n[r['id']]]
             self._groups = [(None, n_un)] + sorted(((c, k) for c, k in groups.items() if k > 1), key=lambda g: -g[1])[:1000]
         self.p_list.delete(0, 'end')
         for r in self._people:
-            self.p_list.insert('end', f'{r["name"]}   ({r["n"]}' + (f', {r["auto"]} to check)' if r['auto'] else ')'))
+            self.p_list.insert('end', f'{r["name"]}   ({r["n"]}' + (f', {r["auto"]} to check' if r['auto'] else '') + ')' +
+                               (f'   +{r["shared"]} shared' if r['shared'] else ''))
         self.g_list.delete(0, 'end')
         for cid, n in self._groups:
             self.g_list.insert('end', f'All unnamed faces   ({n})' if cid is None else f'Group of {n}')
@@ -2072,9 +2076,78 @@ class App:
         with self.cat.tx() as c:
             if other:   # the same person under two names: merge
                 c.execute('UPDATE faces SET person_id = ? WHERE person_id = ?', (other[0], r['id']))
+                c.execute('UPDATE person_refs SET person_id = ? WHERE person_id = ?', (other[0], r['id']))
                 c.execute('DELETE FROM persons WHERE id = ?', (r['id'],))
             else:
                 c.execute('UPDATE persons SET name = ? WHERE id = ?', (name.strip(), r['id']))
+        self.refresh_people()
+
+    def export_people(self):
+        rows = self.cat.q("SELECT p.id, p.name, (SELECT COUNT(*) FROM faces f WHERE f.person_id = p.id AND f.assigned = 'user') AS n, "
+                          '(SELECT COUNT(*) FROM person_refs r WHERE r.person_id = p.id) AS shared FROM persons p ORDER BY p.name COLLATE NOCASE')
+        rows = [r for r in rows if r['n'] or r['shared']]
+        if not rows:
+            messagebox.showinfo(APP, 'Name some faces first: the file holds the faces you have named (confirmed ones only).'); return
+        w = tk.Toplevel(self.root, bg=C['card'], padx=14, pady=12)
+        w.title('Share names'); w.transient(self.root)
+        ttk.Label(w, text='Share names with another Photo Library', style='Big.TLabel').pack(anchor='w')
+        ttk.Label(w, text='Saves the people you pick as a small file: their names and up to '
+                          f'{AI.SHARE_MAX} face vectors each (the numbers face matching uses — no photos, face pictures or file '
+                          'names). Imported into another Photo Library, it suggests these names for the faces in its photos.\n\n'
+                          'Anyone with the file can recognise these people in their own photos: give it only to people you trust.',
+                  style='Muted.TLabel', wraplength=int(420 * self.ui_scale), justify='left').pack(anchor='w', pady=(4, 8))
+        lb = self._scrolled_listbox(w, min(14, max(4, len(rows))), fill='both', expand=True)
+        lb.configure(selectmode='extended')
+        for r in rows:
+            lb.insert('end', f'{r["name"]}   ({r["n"]} named' + (f', {r["shared"]} shared with you' if r['shared'] else '') + ')')
+        lb.selection_set(0, 'end')
+
+        def save():
+            pick = [rows[i]['id'] for i in lb.curselection()]
+            if not pick: return
+            path = filedialog.asksaveasfilename(parent=w, title='Save the names and faces', defaultextension='.json',
+                                                initialfile='people.json', filetypes=[('Photo Library people', '*.json')])
+            if not path: return
+            n_p, n_f = AI.export_people(self.cat, path, pick)
+            w.destroy()
+            self.log('ok', f'{n_p} people ({n_f} face vectors) saved to {path}')
+        self._button_row(w, [('Select all', lambda: lb.selection_set(0, 'end')), ('Save…', save), ('Cancel', w.destroy)], pady=(8, 0))
+        w.grab_set()
+
+    def import_people(self):
+        path = filedialog.askopenfilename(title='Names and faces shared from another Photo Library',
+                                          filetypes=[('Photo Library people', '*.json'), ('All files', '*.*')])
+        if not path: return
+        try:
+            n_p, n_f, n_s = AI.import_people(self.cat, path)
+        except (ValueError, OSError) as ex:
+            messagebox.showerror(APP, f'Could not read {os.path.basename(path)}:\n{ex}'); return
+        self.log('ok', f'{n_p} people imported ({n_f} new face vectors); {n_s} faces here suggested (marked ?)')
+        self.refresh_people()
+        messagebox.showinfo(APP, f'{n_p} people added from {os.path.basename(path)}.\n\n'
+                                 f'{n_s} faces in your photos look like them and are now suggested (marked ?): pick a person on the '
+                                 'left and Confirm the right ones, or Not this person for the others. Photos searched for faces '
+                                 'later get suggestions too (Suggest names).')
+
+    def _person_menu(self, e):
+        i = self.p_list.nearest(e.y)
+        if i < 0 or i >= len(self._people): return
+        self.p_list.selection_clear(0, 'end'); self.p_list.selection_set(i)
+        self._people_selected('person')
+        r = self._people[i]
+        m = self._menu()
+        m.add_command(label='Rename…', command=self.rename_person)
+        m.add_command(label='Show their photos', command=self.person_photos)
+        if r['shared']:
+            m.add_separator()
+            m.add_command(label=f'Forget the {r["shared"]} faces shared for {r["name"]}', command=lambda: self.forget_shared(r))
+        m.tk_popup(e.x_root, e.y_root)
+
+    def forget_shared(self, r):
+        if not messagebox.askyesno(APP, f'Forget the faces of {r["name"]} that were shared with you?\n\n'
+                                        'Faces you named or confirmed yourself stay; unconfirmed suggestions are made again.'): return
+        n = AI.forget_shared(self.cat, [r['id']])
+        self.log('ok', f'shared faces of {r["name"]} forgotten; {n} faces suggested again')
         self.refresh_people()
 
     def person_photos(self):

@@ -442,6 +442,13 @@ CREATE TABLE IF NOT EXISTS faces (
     cluster INTEGER,                       -- group of similar unnamed faces
     vec BLOB NOT NULL                      -- ArcFace embedding, 512 float32, unit length
 );
+CREATE TABLE IF NOT EXISTS person_refs (   -- faces of a person shared from another library: used for suggestions only
+    id INTEGER PRIMARY KEY,
+    person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    source TEXT,                           -- the file it came from
+    vec BLOB NOT NULL                      -- ArcFace embedding, 512 float32, unit length
+);
+CREATE INDEX IF NOT EXISTS person_refs_person ON person_refs(person_id);
 CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 CREATE TABLE IF NOT EXISTS image_vectors (

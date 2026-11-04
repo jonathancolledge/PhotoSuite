@@ -352,6 +352,11 @@ def suggest_people(cat, thresh=FACE_MATCH):
     """Faces nobody has named: give each the person whose user-named faces it is most like (assigned='auto').
     Returns how many faces got a different suggestion than before."""
     nid, npid, nv = _face_matrix(cat, "assigned = 'user'")
+    refs = cat.q('SELECT person_id, vec FROM person_refs')   # faces shared from another library count as named ones
+    if refs:
+        nid = np.concatenate([nid, np.zeros(len(refs), np.int64)])
+        npid = np.concatenate([npid, np.array([r[0] for r in refs])])
+        nv = np.concatenate([nv, np.stack([np.frombuffer(r[1], np.float32) for r in refs])])
     uid, upid, uv = _face_matrix(cat, "assigned IS NULL OR assigned = 'auto'")
     if not len(nid) or not len(uid): return 0
     updates = []
@@ -401,7 +406,83 @@ def name_faces(cat, face_ids, name):
 def unname_faces(cat, face_ids):
     with cat.tx() as c:
         c.executemany('UPDATE faces SET person_id = NULL, assigned = NULL WHERE id = ?', [(int(f),) for f in face_ids])
-        c.execute('DELETE FROM persons WHERE id NOT IN (SELECT person_id FROM faces WHERE person_id IS NOT NULL)')
+        c.execute('DELETE FROM persons WHERE id NOT IN (SELECT person_id FROM faces WHERE person_id IS NOT NULL) '
+                  'AND id NOT IN (SELECT person_id FROM person_refs)')
+
+
+# ───────────────────────────────────────────── sharing names with another library
+SHARE_FORMAT = 'photolibrary-people'
+SHARE_MAX = 200        # faces per person in a shared file: enough to cover a lifetime of looks
+
+
+def _spread(v, k):
+    """Indices of k rows of v that differ most from each other (farthest-point sampling): ages, angles, light."""
+    if len(v) <= k: return list(range(len(v)))
+    pick = [0]
+    d = 1 - v @ v[0]
+    for _ in range(k - 1):
+        j = int(d.argmax()); pick.append(j)
+        d = np.minimum(d, 1 - v @ v[j])
+    return pick
+
+
+def export_people(cat, path, person_ids):
+    """Write the named people's face vectors (the faces you named, and any shared with you) to a JSON file that
+    another Photo Library can import. No photos, file names or face pictures go in it. Returns (people, faces)."""
+    import base64
+    people = []
+    for pid in person_ids:
+        name = cat.q1('SELECT name FROM persons WHERE id = ?', (pid,))
+        rows = cat.q("SELECT vec FROM faces WHERE person_id = ? AND assigned = 'user'", (pid,)) + \
+            cat.q('SELECT vec FROM person_refs WHERE person_id = ?', (pid,))
+        if not name or not rows: continue
+        v = np.stack([np.frombuffer(r[0], np.float32) for r in rows])
+        v = v[_spread(v, SHARE_MAX)]
+        people.append({'name': name[0], 'faces': [base64.b64encode(x.astype(np.float32).tobytes()).decode('ascii') for x in v]})
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'format': SHARE_FORMAT, 'version': 1, 'model': 'buffalo_l ArcFace R50, 512 float32, unit length',
+                   'people': people}, f, ensure_ascii=False)
+    return len(people), sum(len(p['faces']) for p in people)
+
+
+def import_people(cat, path):
+    """Add the people in a shared file: each name becomes a person here (joining one of the same name) with the
+    shared faces as references, then suggestions are made. Returns (people, faces added, faces suggested)."""
+    import base64
+    try:
+        with open(path, encoding='utf-8') as f:
+            d = json.load(f)
+    except ValueError:
+        d = None
+    if not isinstance(d, dict) or d.get('format') != SHARE_FORMAT:
+        raise ValueError('this is not a names-and-faces file exported from Photo Library')
+    src = os.path.basename(path)
+    np_, nf = 0, 0
+    with cat.tx() as c:
+        for p in d.get('people') or []:
+            name = str(p.get('name') or '').strip()
+            vecs = []
+            for s in p.get('faces') or []:
+                v = np.frombuffer(base64.b64decode(s), np.float32)
+                if v.shape == (512,) and np.isfinite(v).all() and abs(np.linalg.norm(v) - 1) < 0.01: vecs.append(v.tobytes())
+            if not name or not vecs: continue
+            c.execute('INSERT OR IGNORE INTO persons (name) VALUES (?)', (name,))
+            pid = c.execute('SELECT id FROM persons WHERE name = ?', (name,)).fetchone()[0]
+            have = {r[0] for r in c.execute('SELECT vec FROM person_refs WHERE person_id = ?', (pid,))}
+            new = [(pid, src, v) for v in vecs if v not in have]
+            c.executemany('INSERT INTO person_refs (person_id, source, vec) VALUES (?, ?, ?)', new)
+            np_ += 1; nf += len(new)
+    return np_, nf, suggest_people(cat)
+
+
+def forget_shared(cat, person_ids):
+    """Drop the faces shared with you for these people (people left with no faces at all go too)."""
+    with cat.tx() as c:
+        c.executemany('DELETE FROM person_refs WHERE person_id = ?', [(int(p),) for p in person_ids])
+        c.execute("UPDATE faces SET person_id = NULL, assigned = NULL WHERE assigned = 'auto'")
+        c.execute('DELETE FROM persons WHERE id NOT IN (SELECT person_id FROM faces WHERE person_id IS NOT NULL) '
+                  'AND id NOT IN (SELECT person_id FROM person_refs)')
+    return suggest_people(cat)
 
 
 # ───────────────────────────────────────────── the runner
