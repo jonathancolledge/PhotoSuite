@@ -569,13 +569,17 @@ class FaceGrid(PhotoGrid):
         if r.get('assigned') == 'auto':   # suggested, not yet confirmed
             self.cv.create_oval(x + cw - 22, y + 6, x + cw - 6, y + 22, fill=C['warn'], outline='')
             self.cv.create_text(x + cw - 14, y + 14, text='?', fill='#000', font=self.f_badge)
+        if 'person' in r:   # the faces of one photo: who each one is
+            self.cv.create_rectangle(x + 2, y + ch - 20, x + cw - 2, y + ch - 2, fill='#000', outline='', stipple='gray50')
+            self.cv.create_text(x + cw / 2, y + ch - 11, text=r['person'] or 'unnamed', width=cw - 8, font=self.f_small,
+                                fill=C['text'] if r['person'] else C['muted'])
         return key
 
     def set_zoom(self, z, around=None):
         pass
 
     def _changed(self):
-        pass
+        self.app.face_selection_changed()
 
     def toggle_single(self, i=None):
         i = self.focus if i is None else i
@@ -975,6 +979,7 @@ class App:
         lb = tk.Label(sr, text='  clear', font=(UI_FONT, 9), bg=C['card'], fg=C['muted'], cursor='hand2')
         lb.pack(side='left', pady=(6, 0))
         lb.bind('<Button-1>', lambda e: self._star_clicked(0))
+        self.faces_btn = ttk.Button(c, text='Name the faces', style='Small.TButton', command=self.photo_faces)
         self.map_btn = ttk.Button(c, text='Show location on a map', style='Small.TButton', command=self.open_map)
         self.caption_lbl = ttk.Label(c, text='', style='Muted.TLabel', wraplength=int(300 * self.ui_scale), justify='left')
 
@@ -1012,6 +1017,12 @@ class App:
         left, _ = self._scroll_column(tab, 330)
         right = ttk.Frame(tab)
         right.pack(side='left', fill='both', expand=True, padx=(10, 0))
+        c = self._card(left, 'Which faces')
+        self.face_filter = tk.BooleanVar(value=False)
+        ttk.Checkbutton(c, text='Only faces in the photos shown on the Library tab', variable=self.face_filter, style='Card.TCheckbutton',
+                        command=self.refresh_people).pack(anchor='w')
+        self.face_filter_lbl = ttk.Label(c, text='', style='Muted.TLabel', wraplength=int(290 * self.ui_scale), justify='left')
+        self.face_filter_lbl.pack(anchor='w', pady=(4, 0))
         c = self._card(left, 'People')
         self.p_list = self._scrolled_listbox(c, 10)
         self.p_list.bind('<<ListboxSelect>>', lambda e: self._people_selected('person'))
@@ -1062,10 +1073,11 @@ class App:
         ttk.Label(c, text='Folders in the library', style='Card.TLabel').pack(anchor='w')
         self.root_list = self._scrolled_listbox(c, 5, pady=(2, 0))
         self.root_list.configure(selectmode='extended')
-        self._button_row(c, [('Add folder…', self.add_folder), ('Rescan selected', self.rescan_selected), ('Remove from library…', self.remove_roots),
-                             ('Forget missing photos', self.forget_missing)])
-        ttk.Label(c, text='Removing a folder forgets its photos\' ratings, tags and descriptions; the files are never touched.',
-                  style='Muted.TLabel').pack(anchor='w', pady=(4, 0))
+        self._button_row(c, [('Add folder…', self.add_folder), ('Rescan selected', self.rescan_selected), ('Remove from library…', self.remove_roots)])
+        self._button_row(c, [('Find moved photos…', self.find_moved), ('Forget missing photos', self.forget_missing)], pady=(4, 0))
+        ttk.Label(c, text='Removing a folder forgets its photos\' ratings, tags and descriptions; the files are never touched.\n'
+                          'Moved or renamed a folder? Find moved photos… reconnects its photos, keeping all of that.',
+                  style='Muted.TLabel', justify='left').pack(anchor='w', pady=(4, 0))
 
         c = self._card(left, 'Thumbnails')
         self._row(c, 'RAW thumbnails', lambda p: self._combo(p, self.thumb_mode, THUMB_MODES), 16)
@@ -1504,6 +1516,7 @@ class App:
             rm.add_command(label='Unrated' if k == 0 else '★' * k, command=lambda k=k: self.set_rating(self.grid.selected_ids(), k))
         m.add_cascade(label='Rating', menu=rm)
         m.add_command(label='Add tags…', command=lambda: self.tag_box.focus_set())
+        m.add_command(label='Name the faces…', command=self.photo_faces)
         m.add_separator()
         m.add_command(label='Open in RAW Demosaic', command=self.open_rawdemosaic)
         m.add_command(label='Batch process in RAW Demosaic…', command=self.batch_rawdemosaic)
@@ -1525,6 +1538,7 @@ class App:
         self._sel_due = None
         ids = self.grid.selected_ids()
         n = len(ids)
+        self.faces_btn.pack_forget()
         self.map_btn.pack_forget()
         self.caption_lbl.pack_forget()
         self._desc_mixed = False
@@ -1565,6 +1579,9 @@ class App:
                 lines.append(f'{len(faces)} face{"s" if len(faces) != 1 else ""}' + (': ' + ', '.join(named) if named else ''))
             if r['missing']: lines.append('⚠ The file is no longer there (moved or deleted outside the app).')
             self.sel_info.configure(text='\n'.join(lines))
+            if faces:
+                self.faces_btn.configure(text='Name the face' if len(faces) == 1 else f'Name the {len(faces)} faces')
+                self.faces_btn.pack(anchor='w', pady=(6, 0))
             if r['lat'] is not None: self.map_btn.pack(anchor='w', pady=(6, 0))
             if r['caption']:
                 self.caption_lbl.configure(text='AI caption: ' + r['caption'])
@@ -1750,14 +1767,16 @@ class App:
         roots = [self.root_list.get(i) for i in self.root_list.curselection()]
         if roots: self._rescan(roots)
 
-    def _rescan(self, folders):
+    def _rescan(self, folders, first=None, label='Scanning', done=None):
+        """Scan folders, make the new photos' thumbnails (and run the AI on them if that's on). first(job), when given,
+        runs before and returns the folders to scan instead."""
         min_prev, rd = self.min_preview(), self.rd_dir.get().strip()
         faces, embed, caption, auto = self.ai_faces.get(), self.ai_embed.get(), self.ai_caption.get(), self.ai_auto.get()
         ai = self._ai() if auto and (faces or embed or caption) else None
 
         def fn(job):
             new = []
-            for f in folders:
+            for f in (first(job) if first else folders):
                 ids = self.cat.scan(f, job)
                 job.post('call', self.refresh_all)
                 self.cat.make_thumbnails(ids, job, min_prev, rd)
@@ -1773,7 +1792,7 @@ class App:
                 else:
                     job.log('warn', 'AI skipped: its models are not downloaded yet (Settings & AI)')
             return len(new)
-        self.run_task('Scanning', fn, done=lambda n: (self.refresh_all(), self.refresh_settings_info()))
+        self.run_task(label, fn, done=lambda n: (self.refresh_all(), self.refresh_settings_info(), done and done()))
 
     def remove_roots(self):
         roots = [self.root_list.get(i) for i in self.root_list.curselection()]
@@ -1786,6 +1805,40 @@ class App:
         self.scope = None
         self.refresh_all()
         self.log('ok', f'removed {len(roots)} folder{"s" if len(roots) != 1 else ""} from the library ({n} photos forgotten)')
+
+    def find_moved(self):
+        d = filedialog.askdirectory(initialdir=self.settings.get('add_dir'),
+                                    title='Where are the moved photos now? (its subfolders are searched too)')
+        if not d: return
+        d = os.path.normpath(d)
+        out = {}
+
+        def first(job):
+            r = out['r'] = self.cat.find_moved(d, job)
+            if not r['lost']: return []
+            moved = r['by_name'] + r['by_exif']
+            job.log('ok' if moved else 'warn', f'{moved} of {r["lost"]} missing photos found in {d}' +
+                    (f' ({r["by_exif"]} renamed)' if r['by_exif'] else '') +
+                    (f', {r["merged"]} merged with their copy catalogued after the move' if r['merged'] else ''))
+            if r['root_added']: job.log('info', f'{r["root_added"]} added to the library folders')
+            return [d] if self.cat.root_of(d) else []   # then catalogue whatever else is there, inside the library's folders only
+
+        def report():
+            r = out.get('r')
+            if not r: return
+            if not r['lost']:
+                messagebox.showinfo(APP, 'No catalogued photo is missing, so there is nothing to find.\n\n'
+                                         'To add the photos in this folder to the library, use Add folder….'); return
+            moved = r['by_name'] + r['by_exif']
+            msg = f'{moved} of the {r["lost"]} missing photos were found in\n{d}\nand keep their thumbnails, ratings, tags, faces and AI data.'
+            if r['by_exif']: msg += f'\n\n{r["by_exif"]} of them had been renamed (matched by size, date taken, camera and pixel size).'
+            if r['merged']: msg += (f'\n\n{r["merged"]} had already been catalogued again at the new place: each pair was merged into the '
+                                    'original entry, keeping ratings, tags and descriptions from both.')
+            if r['ambiguous']: msg += f'\n\n{r["ambiguous"]} could have been more than one file, so they were left alone.'
+            if r['still_missing']: msg += (f'\n\n{r["still_missing"]} are still missing: they may be in another folder (run Find moved photos… '
+                                           'again there) or deleted (Forget missing photos).')
+            messagebox.showinfo(APP, msg)
+        self._rescan([], first=first, label='Finding moved photos', done=report)
 
     def forget_missing(self):
         n = self.cat.q1('SELECT COUNT(*) FROM photos WHERE missing = 1')[0]
@@ -1869,14 +1922,32 @@ class App:
     def refresh_people(self):
         self.cat.sync_person_tags()   # after every naming, confirming, renaming or "not this person"
         self.selection_changed()
-        self._people = self.cat.q('SELECT p.id, p.name, COUNT(f.id) AS n, SUM(f.assigned = \'auto\') AS auto FROM persons p '
-                                  'LEFT JOIN faces f ON f.person_id = p.id GROUP BY p.id ORDER BY p.name COLLATE NOCASE')
+        allowed = self._face_photos()
+        if allowed is None:
+            self.face_filter_lbl.configure(text='Tick to see only the faces in photos you have filtered on the Library tab '
+                                                '(by date, camera, tags, folder …) — then name them in bulk.')
+            self._people = self.cat.q('SELECT p.id, p.name, COUNT(f.id) AS n, SUM(f.assigned = \'auto\') AS auto FROM persons p '
+                                      'LEFT JOIN faces f ON f.person_id = p.id GROUP BY p.id ORDER BY p.name COLLATE NOCASE')
+            n_un = self.cat.q1('SELECT COUNT(*) FROM faces WHERE person_id IS NULL')[0]
+            self._groups = [(None, n_un)] + [(r[0], r[1]) for r in self.cat.q(
+                'SELECT cluster, COUNT(*) AS n FROM faces WHERE person_id IS NULL AND cluster IS NOT NULL GROUP BY cluster HAVING n > 1 ORDER BY n DESC LIMIT 1000')]
+        else:   # counted here, over the faces of the photos shown only; people with none of them are left out
+            what = self.results[0] if self.results else self._scope_label()
+            self.face_filter_lbl.configure(text=f'{len(allowed)} photo{"s" if len(allowed) != 1 else ""} · {what} · {L.describe(self.collect_spec())}')
+            n, auto, n_un, groups = defaultdict(int), defaultdict(int), 0, defaultdict(int)
+            for pid, photo, assigned, cluster in self.cat.q('SELECT person_id, photo_id, assigned, cluster FROM faces'):
+                if photo not in allowed: continue
+                if pid is None:
+                    n_un += 1
+                    if cluster is not None: groups[cluster] += 1
+                else:
+                    n[pid] += 1; auto[pid] += assigned == 'auto'
+            self._people = [{'id': r['id'], 'name': r['name'], 'n': n[r['id']], 'auto': auto[r['id']]}
+                            for r in self.cat.q('SELECT id, name FROM persons ORDER BY name COLLATE NOCASE') if n[r['id']]]
+            self._groups = [(None, n_un)] + sorted(((c, k) for c, k in groups.items() if k > 1), key=lambda g: -g[1])[:1000]
         self.p_list.delete(0, 'end')
         for r in self._people:
             self.p_list.insert('end', f'{r["name"]}   ({r["n"]}' + (f', {r["auto"]} to check)' if r['auto'] else ')'))
-        n_un = self.cat.q1('SELECT COUNT(*) FROM faces WHERE person_id IS NULL')[0]
-        self._groups = [(None, n_un)] + [(r[0], r[1]) for r in self.cat.q(
-            'SELECT cluster, COUNT(*) AS n FROM faces WHERE person_id IS NULL AND cluster IS NOT NULL GROUP BY cluster HAVING n > 1 ORDER BY n DESC LIMIT 1000')]
         self.g_list.delete(0, 'end')
         for cid, n in self._groups:
             self.g_list.insert('end', f'All unnamed faces   ({n})' if cid is None else f'Group of {n}')
@@ -1896,16 +1967,75 @@ class App:
             cid, n = self._groups[s[0]]
             self._load_faces('group', cid, 'All unnamed faces' if cid is None else f'Group of {n}')
 
-    def _load_faces(self, kind, key, title):
+    def _load_faces(self, kind, key, title, keep=True):
         self._face_source = (kind, key, title)
         if kind == 'person':
             rows = self.cat.q("SELECT id, photo_id, x0, y0, x1, y1, assigned FROM faces WHERE person_id = ? ORDER BY assigned = 'auto' DESC, id", (key,))
         elif key is None:
-            rows = self.cat.q('SELECT id, photo_id, x0, y0, x1, y1, assigned FROM faces WHERE person_id IS NULL ORDER BY cluster, id LIMIT 20000')
+            rows = self.cat.q('SELECT id, photo_id, x0, y0, x1, y1, assigned FROM faces WHERE person_id IS NULL ORDER BY cluster, id'
+                              + ('' if self._face_photos() is not None else ' LIMIT 20000'))
+        elif kind == 'photos':   # every face in these photos, named or not, left to right
+            rows = self._q_in('SELECT f.id, f.photo_id, f.x0, f.y0, f.x1, f.y1, f.assigned, p.name AS person FROM faces f '
+                              'LEFT JOIN persons p ON p.id = f.person_id WHERE f.photo_id IN ({})', key)
+            order = {p: i for i, p in enumerate(key)}
+            rows.sort(key=lambda r: (order[r['photo_id']], r['x0']))
         else:
             rows = self.cat.q('SELECT id, photo_id, x0, y0, x1, y1, assigned FROM faces WHERE person_id IS NULL AND cluster = ? ORDER BY id', (key,))
+        allowed = self._face_photos() if kind != 'photos' else None
+        if allowed is not None:
+            rows = [r for r in rows if r['photo_id'] in allowed][:20000]
+            title += ' in the photos shown'
         self.face_title.configure(text=f'{title} — {len(rows)} face{"s" if len(rows) != 1 else ""}')
-        self.fgrid.set_items([r['id'] for r in rows], {r['id']: dict(r) for r in rows})
+        self.fgrid.set_items([r['id'] for r in rows], {r['id']: dict(r) for r in rows}, keep)
+        return rows
+
+    def _face_photos(self):
+        """The photo ids faces are limited to (those the Library tab shows), or None for every face."""
+        return set(self.grid.ids) if self.face_filter.get() else None
+
+    def _q_in(self, sql, ids):
+        """sql with 'IN ({})' run over ids in chunks (SQLite allows only so many parameters)."""
+        out = []
+        for k in range(0, len(ids), 900):
+            part = list(ids[k:k + 900])
+            out += self.cat.q(sql.format(','.join('?' * len(part))), part)
+        return out
+
+    def photo_faces(self):
+        """The People tab showing the faces in the selected photos, ready to name."""
+        ids = self.grid.selected_ids()[:5000]
+        if not ids: return
+        n = len(ids)
+        if not self._q_in('SELECT id FROM faces WHERE photo_id IN ({})', ids):
+            searched = len(self._q_in(f'SELECT id FROM photos WHERE ai & {L.AI_FACES} > 0 AND id IN ({{}})', ids))
+            messagebox.showinfo(APP, ('No faces were found in this photo.' if n == 1 else 'No faces were found in these photos.') if searched == n else
+                                ('This photo has' if n == 1 else f'{n - searched} of these photos have') + ' not been searched for faces yet: '
+                                'right-click → Run AI again (with "Find faces" ticked in Settings & AI).')
+            return
+        self.p_list.selection_clear(0, 'end')
+        self.g_list.selection_clear(0, 'end')
+        self.face_name.set('')
+        title = f'Faces in {self.cat.q1("SELECT name FROM photos WHERE id = ?", (ids[0],))[0]}' if n == 1 else f'Faces in {n} photos'
+        self._load_faces('photos', tuple(ids), title, keep=False)
+        self.nb.select(1)
+        self._next_unnamed()
+        self.face_name_box.focus_set()
+
+    def _next_unnamed(self, after=None):
+        """Select the next unnamed face of the photos shown (after the face `after`), ready for a name."""
+        ids = self.fgrid.ids
+        start = ids.index(after) + 1 if after in ids else 0
+        nxt = next((i for i in ids[start:] + ids[:start] if not self.fgrid.rows[i].get('person')), None)
+        if nxt is None: return
+        self.fgrid.select_ids([nxt])
+        self.fgrid.ensure_visible(self.fgrid.pos[nxt])
+        self.face_name.set('')
+
+    def face_selection_changed(self):
+        """Picking a named face in a photo's faces puts its name in the box, to correct or reuse."""
+        ids = self.fgrid.selected_ids()
+        r = self.fgrid.rows.get(ids[0]) if len(ids) == 1 else None
+        if r and r.get('person'): self.face_name.set(r['person'])
 
     def name_faces(self):
         ids = self.fgrid.selected_ids()
@@ -1918,6 +2048,7 @@ class App:
         n = AI.suggest_people(self.cat)
         self.log('ok', f'{len(ids)} face{"s" if len(ids) != 1 else ""} named {name}' + (f'; {n} other faces suggested (marked ?)' if n else ''))
         self.refresh_people()
+        if self._face_source and self._face_source[0] == 'photos': self._next_unnamed(ids[-1])
 
     def confirm_faces(self):
         ids = self.fgrid.selected_ids() or [i for i in self.fgrid.ids if self.fgrid.rows[i].get('assigned') == 'auto']

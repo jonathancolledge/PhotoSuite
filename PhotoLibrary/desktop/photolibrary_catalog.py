@@ -16,6 +16,7 @@ import sqlite3
 import sys
 import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
@@ -741,10 +742,131 @@ class Catalog:
             im.save(self.thumb_path(pid, s), 'JPEG', quality=88 if s > 128 else 85, optimize=True)
 
     def forget_missing(self):
+        ids = [r['id'] for r in self.q('SELECT id FROM photos WHERE missing = 1')]
         with self.tx() as c:
-            n = c.execute('DELETE FROM photos WHERE missing = 1').rowcount
+            c.execute('DELETE FROM photos WHERE missing = 1')
             c.execute('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM photo_tags)')
-        return n
+        self._delete_thumbs(ids)
+        return len(ids)
+
+    def _delete_thumbs(self, ids):
+        for pid in ids:
+            for s in THUMB_SIZES:
+                try: os.remove(self.thumb_path(pid, s))
+                except OSError: pass
+
+    # ─── photos that were moved
+    def find_moved(self, folder, job, threads=8):
+        """Catalogued photos whose files are gone, looked for in folder (and its subfolders): each one found keeps its
+        catalog entry — thumbnails, rating, tags, description, faces, AI — and just points at its new path.
+
+        A match is the same file name and exact size; a renamed file needs the same size, date taken, camera and
+        pixel size (its EXIF is read to check). Only unambiguous matches are made: when two files fit, the one whose
+        folder names match the old ones wins, otherwise the photo is left missing. A photo already catalogued again at
+        its new place (a scan after the move) is merged into its old entry: your rating, tags and description from
+        either are kept, the newer entry's thumbnails and AI data go. Returns a summary dict."""
+        folder = norm(folder)
+        job.progress(0, 'Checking which catalogued photos are gone…')
+        rows = self.q('SELECT id, path, folder, name, size, taken, model, width, height, missing FROM photos')
+        exists = {}
+        lost = []
+        for i, r in enumerate(rows):
+            if i % 2000 == 0: job.check()
+            d = os.path.normcase(r['folder'])
+            if d not in exists: exists[d] = os.path.isdir(r['folder'])
+            if not exists[d] or not os.path.isfile(r['path']): lost.append(r)
+        res = dict(lost=len(lost), by_name=0, by_exif=0, merged=0, ambiguous=0, still_missing=0, root_added=None)
+        if not lost: return res
+
+        job.progress(0, f'Looking for {len(lost)} photos in {folder}…')
+        lib = os.path.normcase(self.dir)
+        found = []                        # (path, stat)
+        for dirpath, dirnames, filenames in os.walk(folder):
+            job.check()
+            dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith('.')
+                                 and os.path.normcase(os.path.join(dirpath, d)) != lib)
+            for fn in filenames:
+                if not fn.lower().endswith(SUPPORTED_EXTS) or fn.startswith('._'): continue
+                fp = os.path.join(dirpath, fn)
+                try: found.append((fp, os.stat(fp)))
+                except OSError: pass
+        by_name, by_size = defaultdict(list), defaultdict(list)
+        for fp, st in found:
+            by_name[(os.path.basename(fp).lower(), st.st_size)].append((fp, st))
+            by_size[st.st_size].append((fp, st))
+
+        def tail_match(old, new):
+            """How many folder names, from the file upwards, the old and new paths share: a tie-breaker."""
+            a, b = os.path.normcase(os.path.dirname(old)).split(os.sep)[::-1], os.path.normcase(os.path.dirname(new)).split(os.sep)[::-1]
+            n = 0
+            while n < min(len(a), len(b)) and a[n] == b[n]: n += 1
+            return n
+
+        def pick(r, cands):
+            if len(cands) == 1: return cands[0]
+            score = [tail_match(r['path'], fp) for fp, _ in cands]
+            best = max(score)
+            return cands[score.index(best)] if score.count(best) == 1 else None
+
+        used, matches, unmatched, todo = set(), [], [], lost
+        for _ in range(2):                # 1) same name and size; again for the unclear ones once the clear ones are taken
+            unmatched = []
+            for r in todo:
+                cands = [c for c in by_name.get((r['name'].lower(), r['size']), []) if os.path.normcase(c[0]) not in used]
+                hit = pick(r, cands) if cands else None
+                if hit:
+                    used.add(os.path.normcase(hit[0])); matches.append((r, hit)); res['by_name'] += 1
+                else:
+                    unmatched.append(r)
+            todo = unmatched
+        exif = {}
+        for i, r in enumerate(unmatched):  # 2) renamed: same size, and the same date taken, camera and pixel size
+            if i % 50 == 0: job.progress(i / max(1, len(unmatched)), f'Checking renamed files {i}/{len(unmatched)}')
+            cands = [c for c in by_size.get(r['size'], []) if os.path.normcase(c[0]) not in used]
+            if not r['taken'] or not cands or len(cands) > 20: continue
+            ok = []
+            for fp, st in cands:
+                if fp not in exif: exif[fp] = _safe_meta(fp, st)
+                m = exif[fp]
+                if m['taken'] == r['taken'] and (m['model'] or '') == (r['model'] or '') and (m['width'], m['height']) == (r['width'], r['height']):
+                    ok.append((fp, st))
+            hit = pick(r, ok) if ok else None
+            if hit:
+                used.add(os.path.normcase(hit[0])); matches.append((r, hit)); res['by_exif'] += 1
+        res['still_missing'] = len(lost) - len(matches)
+        moved = {r['id'] for r, _ in matches}
+        res['ambiguous'] = sum(1 for r in lost if r['id'] not in moved and len(by_name.get((r['name'].lower(), r['size']), [])) > 1)
+
+        job.progress(1, f'Updating {len(matches)} catalog entries…')
+        dup_ids = []
+        with self.tx() as c:
+            for r, (fp, st) in matches:
+                dup = c.execute('SELECT id, rating, description FROM photos WHERE path = ? AND id != ?', (fp, r['id'])).fetchone()
+                if dup:                   # catalogued again after the move: keep the old entry, bring over your edits
+                    c.execute("UPDATE photos SET rating = CASE WHEN rating = 0 THEN ? ELSE rating END, "
+                              "description = CASE WHEN description = '' THEN ? ELSE description END WHERE id = ?",
+                              (dup['rating'], dup['description'], r['id']))
+                    c.execute("INSERT OR IGNORE INTO photo_tags (photo_id, tag_id, source) SELECT ?, tag_id, source FROM photo_tags "
+                              "WHERE photo_id = ? AND source = 'user'", (r['id'], dup['id']))
+                    c.execute('DELETE FROM photos WHERE id = ?', (dup['id'],))   # its faces, vectors and tags go with it
+                    dup_ids.append(dup['id']); res['merged'] += 1
+                c.execute('UPDATE photos SET path = ?, folder = ?, name = ?, ext = ?, mtime = ?, missing = 0 WHERE id = ?',
+                          (fp, os.path.dirname(fp), os.path.basename(fp), os.path.splitext(fp)[1].lower(), st.st_mtime, r['id']))
+            c.executemany('UPDATE photos SET missing = 1 WHERE id = ?', [(r['id'],) for r in lost if r['id'] not in moved])
+            c.execute('DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM photo_tags)')
+        self._delete_thumbs(dup_ids)
+        if res['merged']: self.sync_person_tags()
+        if matches and not self.root_of(folder):
+            res['root_added'] = self.add_root(folder)
+        with self.tx() as c:              # library folders that are gone and now hold nothing
+            for root in self.roots():
+                w, p = _under('path', root)
+                if not os.path.isdir(root) and not c.execute('SELECT 1 FROM photos WHERE ' + w + ' LIMIT 1', p).fetchone():
+                    c.execute('DELETE FROM folders WHERE ' + w, p)
+                    c.execute('DELETE FROM roots WHERE path = ?', (root,))
+            gone = [(f,) for (f,) in c.execute('SELECT path FROM folders').fetchall() if not os.path.isdir(f)]
+            c.executemany('DELETE FROM folders WHERE path = ? AND NOT EXISTS (SELECT 1 FROM photos WHERE folder = folders.path)', gone)
+        return res
 
     # ─── queries
     def query_ids(self, spec, scope=None, sort='Date taken', desc=False, ids=None):
