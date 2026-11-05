@@ -903,6 +903,40 @@ class Catalog:
         if job.cancel_event.is_set(): raise Cancelled()
         return len(done), sizes[0], sizes[1]
 
+    REBUILD_KEY = 'thumb_rebuild_upto'
+
+    def rebuild_left(self):
+        """Photos an unfinished 'rebuild all thumbnails' still has to do, or None when none is under way."""
+        r = self.q1('SELECT value FROM meta WHERE key = ?', (self.REBUILD_KEY,))
+        if not r: return None
+        return self.q1('SELECT COUNT(*) FROM photos WHERE missing = 0 AND id > ?', (int(r[0]),))[0]
+
+    def rebuild_all_thumbs(self, job, min_preview=1024, rawdemosaic_dir=None, restart=False, chunk=500):
+        """Make every photo's thumbnails afresh from its original, in the current format; nothing else about the photos
+        is touched. Goes by id in chunks and keeps the last chunk finished in meta, so after Cancel running it again
+        carries on (restart=True begins again). Missing photos keep the thumbnails they have. -> photos done."""
+        with self.tx() as c:
+            if restart: c.execute('DELETE FROM meta WHERE key = ?', (self.REBUILD_KEY,))
+            c.execute('INSERT OR IGNORE INTO meta (key, value) VALUES (?, 0)', (self.REBUILD_KEY,))
+        upto = int(self.q1('SELECT value FROM meta WHERE key = ?', (self.REBUILD_KEY,))[0])
+        ids = [r[0] for r in self.q('SELECT id FROM photos WHERE missing = 0 AND id > ? ORDER BY id', (upto,))]
+        t0, n = time.time(), len(ids)
+        for k in range(0, n, chunk):
+            part = ids[k:k + chunk]
+
+            def progress(f, label=None, k=k, m=len(part)):
+                d = k + round(f * m)
+                job.progress(d / n, f'Rebuilding thumbnails {d:,}/{n:,}{_eta(t0, d, n) if d else ""}')
+            sub = Job(log=lambda lvl, msg: lvl != 'ok' and job.log(lvl, msg), progress=progress, post=job.post)
+            sub.cancel_event = job.cancel_event
+            self.make_thumbnails(part, sub, min_preview, rawdemosaic_dir)   # raises Cancelled: this chunk is redone next time
+            with self.tx() as c:
+                c.execute('UPDATE meta SET value = ? WHERE key = ?', (part[-1], self.REBUILD_KEY))
+        with self.tx() as c:
+            c.execute('DELETE FROM meta WHERE key = ?', (self.REBUILD_KEY,))
+        job.log('ok', f'{n:,} photos\' thumbnails rebuilt from the originals as {self.thumb_spec()} in {time.time() - t0:.0f} s')
+        return n
+
     def forget_missing(self):
         ids = [r['id'] for r in self.q('SELECT id FROM photos WHERE missing = 1')]
         with self.tx() as c:

@@ -699,6 +699,30 @@ class App:
                       done=lambda r: (self.refresh_settings_info(), self.thumb_est_lbl.configure(
                           text=f'{r[0]:,} photos recompressed: {L.fmt_bytes(r[1])} → {L.fmt_bytes(r[2])}.') if r and r[0] else None))
 
+    def rebuild_all_thumbs(self):
+        self._thumb_format_changed()
+        name = f'{label_of(THUMB_FORMAT_LABELS, self.cat.thumb_fmt).split(" —")[0]} {self.cat.thumb_q}'
+        left, restart = self.cat.rebuild_left(), False
+        n = self.cat.q1('SELECT COUNT(*) FROM photos WHERE missing = 0')[0]
+        if not n:
+            messagebox.showinfo(APP, 'No catalogued photo is on disk.'); return
+        if left:
+            ans = messagebox.askyesnocancel(APP, f'A rebuild of every thumbnail was stopped with {left:,} photos still to do.\n\n'
+                                                 f'Yes: carry on with those {left:,}.\nNo: start again with all {n:,}.')
+            if ans is None: return
+            restart = not ans
+        else:
+            restart = True
+            if not messagebox.askyesno(APP, f'Make the thumbnails of all {n:,} photos afresh from the originals, as {name}?\n\n'
+                                            'Only the thumbnails are redone: ratings, tags, descriptions, faces and the rest are '
+                                            'untouched, and each photo keeps its old thumbnails until its new ones are written. '
+                                            'Photos that are missing keep theirs.\n\n'
+                                            'It reads every original (RAW files can be demosaiced), so it is much slower than '
+                                            'Recompress. Cancel stops it at any point; running it again offers to carry on.'): return
+        min_prev, rd = self.min_preview(), self.rd_dir.get().strip()
+        self.run_task('Rebuilding thumbnails', lambda job: self.cat.rebuild_all_thumbs(job, min_prev, rd, restart),
+                      done=lambda r: self.refresh_settings_info())
+
     # ─────────────────────────────── look
     def _style(self):
         st = ttk.Style(self.root)
@@ -1128,7 +1152,7 @@ class App:
         self._row(c, 'RAW thumbnails', lambda p: self._combo(p, self.thumb_mode, THUMB_MODES), 16)
         ttk.Label(c, text='Thumbnails are 128, 512 and 1024 px. A RAW file\'s embedded JPEG is used when it is big enough;\n'
                           'otherwise the RAW data is demosaiced with RCD by RAW Demosaic\'s own engine (Bayer; X-Trans uses\n'
-                          'LibRaw\'s 1-pass Markesteijn). Right-click photos → Rebuild thumbnails to redo them.',
+                          'LibRaw\'s 1-pass Markesteijn). Right-click photos → Rebuild thumbnails to redo just those.',
                   style='Muted.TLabel', justify='left').pack(anchor='w', pady=(2, 6))
         r = ttk.Frame(c, style='Card.TFrame'); r.pack(fill='x', pady=2)
         ttk.Label(r, text='Saved as', style='Card.TLabel', width=16).pack(side='left')
@@ -1141,6 +1165,7 @@ class App:
         sp.bind('<FocusOut>', lambda e: self._thumb_format_changed())
         sp.bind('<Return>', lambda e: self._thumb_format_changed())
         self._button_row(c, [('Estimate the saving', self.estimate_thumbs), ('Recompress existing thumbnails…', self.recompress_thumbs)])
+        self._button_row(c, [('Rebuild all thumbnails from the originals…', self.rebuild_all_thumbs)], pady=(4, 0))
         self.thumb_est_lbl = ttk.Label(c, text='New thumbnails are saved this way. JPEG 88 is what was always used; WebP 85 and AVIF 65 look\n'
                                                'the same (as close to the photo) in about 65% and 50% of the space. Higher quality: bigger files.',
                                        style='Muted.TLabel', justify='left')
