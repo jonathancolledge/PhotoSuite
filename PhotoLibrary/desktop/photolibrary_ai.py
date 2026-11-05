@@ -531,8 +531,7 @@ class AI:
         return getattr(self, part)
 
     def _thumb(self, pid):
-        p = self.cat.thumb_path(pid, 1024)
-        if not os.path.exists(p): p = self.cat.best_thumb(pid, 1024)
+        p = self.cat.best_thumb(pid, 1024)
         return Image.open(p).convert('RGB') if p else None
 
     def run(self, ids, job, faces=True, embed=True, caption=True, batch=8):

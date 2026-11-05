@@ -51,6 +51,7 @@ RATING_FILTER = [('Any', None), ('Unrated', 'unrated'), ('1★ or more', 1), ('2
                  ('4★ or more', 4), ('5★', 5)]
 THUMB_MODES = [('Embedded preview if 1024 px or more, else RCD', 1024), ('Embedded preview if 512 px or more, else RCD', 512),
                ('Any embedded preview, else RCD', 1), ('Always RCD demosaic', None)]
+THUMB_FORMAT_LABELS = [('JPEG — as always', 'jpeg'), ('WebP — about a third smaller', 'webp'), ('AVIF — about half the size', 'avif')]
 GPS_FILTER = [('Any', None), ('With GPS', True), ('Without GPS', False)]
 KIND_FILTER = [('Any', None), ('RAW (any)', 'raw'), ('Not RAW', 'image')]   # + each catalogued file type
 SEARCH_MODES = ['Keywords', 'Meaning (AI)']
@@ -599,6 +600,7 @@ class App:
         self.settings = self._load_settings()
         s = self.settings
         self.cat = L.Catalog(s.get('library_dir') or L.DEFAULT_LIBRARY)
+        self.cat.set_thumb_format(s.get('thumb_format', 'jpeg'), s.get('thumb_quality'))
         self.ai = None
         self.loader = ThumbLoader(self.cat, self.q)
         self.scope = None                 # what the Browse trees point at
@@ -647,7 +649,7 @@ class App:
                  rawdemosaic_dir=self.rd_dir.get().strip(), panostitch_dir=self.ps_dir.get().strip(), batch_settings=self.batch_json.get().strip(),
                  thumb_mode=key_of(THUMB_MODES, self.thumb_mode.get(), 1024), models_dir=self.models_dir.get().strip(),
                  device=self.device_key(), ai_faces=self.ai_faces.get(), ai_embed=self.ai_embed.get(), ai_caption=self.ai_caption.get(),
-                 ai_auto=self.ai_auto.get(), show_focus=self.show_focus.get())
+                 ai_auto=self.ai_auto.get(), show_focus=self.show_focus.get(), thumb_format=self.cat.thumb_fmt, thumb_quality=self.cat.thumb_q)
         if not zoomed: s['geometry'] = self.root.geometry()
         try:
             with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
@@ -657,6 +659,45 @@ class App:
 
     def min_preview(self):
         return key_of(THUMB_MODES, self.thumb_mode.get(), 1024)
+
+    def _thumb_format_changed(self, new_format=False):
+        fmt = key_of(THUMB_FORMAT_LABELS, self.thumb_fmt_lbl.get(), 'jpeg')
+        if new_format: self.thumb_q.set(str(L.THUMB_QUALITY[fmt]))   # each format's own sensible default
+        try:
+            q = int(float(self.thumb_q.get()))
+        except ValueError:
+            q = L.THUMB_QUALITY[fmt]
+        self.cat.set_thumb_format(fmt, q)
+        self.thumb_q.set(str(self.cat.thumb_q))
+
+    def estimate_thumbs(self):
+        self._thumb_format_changed()
+        fmt, q = self.cat.thumb_fmt, self.cat.thumb_q
+
+        def done(r):
+            if not r: return
+            name = f'{label_of(THUMB_FORMAT_LABELS, fmt).split(" —")[0]} {q}'
+            txt = (f'Thumbnails now: {L.fmt_bytes(r["bytes"])} in {r["files"]:,} files. As {name}: about {L.fmt_bytes(r["estimate"])} '
+                   f'({(r["ratio"] - 1) * 100:+.0f}%,\nfrom {r["sample"]} photos tried). {r["todo"]:,} photos\' thumbnails are not {name} yet.')
+            self.thumb_est_lbl.configure(text=txt)
+            self.log('info', txt.replace('\n', ' '))
+        self.run_task('Estimating', lambda job: self.cat.estimate_thumbs(fmt, q), done=done)
+
+    def recompress_thumbs(self):
+        self._thumb_format_changed()
+        spec = self.cat.thumb_spec()
+        n = self.cat.q1("SELECT COUNT(*) FROM photos WHERE thumb = 1 AND COALESCE(thumb_spec, 'jpeg88') != ?", (spec,))[0]
+        name = f'{label_of(THUMB_FORMAT_LABELS, self.cat.thumb_fmt).split(" —")[0]} {self.cat.thumb_q}'
+        if not n:
+            messagebox.showinfo(APP, f'Every thumbnail is already {name}.'); return
+        if not messagebox.askyesno(APP, f'Re-encode the thumbnails of {n:,} photos as {name}?\n\n'
+                                        'They are made from the thumbnails already stored, so the photos themselves aren\'t needed and '
+                                        'it is quick — but it is a second encoding, with a slight extra loss. (Right-click photos → '
+                                        'Rebuild thumbnails makes them afresh from the originals instead.)\n\n'
+                                        'Cancel stops it at any point; running it again carries on where it stopped.'): return
+        self.run_task('Recompressing thumbnails', lambda job: self.cat.recompress_thumbs(job),
+                      done=lambda r: (self.refresh_settings_info(), self.thumb_est_lbl.configure(
+                          text=f'{r[0]:,} photos recompressed: {L.fmt_bytes(r[1])} → {L.fmt_bytes(r[2])}.') if r and r[0] else None))
 
     # ─────────────────────────────── look
     def _style(self):
@@ -849,6 +890,8 @@ class App:
         self.ps_dir = tk.StringVar(value=s.get('panostitch_dir') or DEFAULT_PANOSTITCH)
         self.batch_json = tk.StringVar(value=s.get('batch_settings', ''))
         self.thumb_mode = tk.StringVar(value=label_of(THUMB_MODES, s.get('thumb_mode', 1024)))
+        self.thumb_fmt_lbl = tk.StringVar(value=label_of(THUMB_FORMAT_LABELS, self.cat.thumb_fmt))
+        self.thumb_q = tk.StringVar(value=str(self.cat.thumb_q))
         self.models_dir = tk.StringVar(value=s.get('models_dir') or AI.DEFAULT_MODELS)
         self.device = tk.StringVar(value='')
         self.ai_faces = tk.BooleanVar(value=s.get('ai_faces', True))
@@ -1086,7 +1129,22 @@ class App:
         ttk.Label(c, text='Thumbnails are 128, 512 and 1024 px. A RAW file\'s embedded JPEG is used when it is big enough;\n'
                           'otherwise the RAW data is demosaiced with RCD by RAW Demosaic\'s own engine (Bayer; X-Trans uses\n'
                           'LibRaw\'s 1-pass Markesteijn). Right-click photos → Rebuild thumbnails to redo them.',
-                  style='Muted.TLabel', justify='left').pack(anchor='w', pady=(2, 0))
+                  style='Muted.TLabel', justify='left').pack(anchor='w', pady=(2, 6))
+        r = ttk.Frame(c, style='Card.TFrame'); r.pack(fill='x', pady=2)
+        ttk.Label(r, text='Saved as', style='Card.TLabel', width=16).pack(side='left')
+        fc = self._combo(r, self.thumb_fmt_lbl, THUMB_FORMAT_LABELS, 30)
+        fc.pack(side='left')
+        fc.bind('<<ComboboxSelected>>', lambda e: self._thumb_format_changed(True))
+        ttk.Label(r, text='  quality', style='Card.TLabel').pack(side='left')
+        sp = ttk.Spinbox(r, from_=30, to=100, increment=1, width=5, textvariable=self.thumb_q, command=self._thumb_format_changed)
+        sp.pack(side='left', padx=(4, 0))
+        sp.bind('<FocusOut>', lambda e: self._thumb_format_changed())
+        sp.bind('<Return>', lambda e: self._thumb_format_changed())
+        self._button_row(c, [('Estimate the saving', self.estimate_thumbs), ('Recompress existing thumbnails…', self.recompress_thumbs)])
+        self.thumb_est_lbl = ttk.Label(c, text='New thumbnails are saved this way. JPEG 88 is what was always used; WebP 85 and AVIF 65 look\n'
+                                               'the same (as close to the photo) in about 65% and 50% of the space. Higher quality: bigger files.',
+                                       style='Muted.TLabel', justify='left')
+        self.thumb_est_lbl.pack(anchor='w', pady=(4, 0))
 
         c = self._card(left, 'Other apps')
         for label, var, title in (('RAW Demosaic', self.rd_dir, 'RAW Demosaic\'s desktop folder'),

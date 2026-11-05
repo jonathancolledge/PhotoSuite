@@ -547,14 +547,57 @@ ILLUMINANT_CCT = {1: 5500, 2: 4200, 3: 2850, 4: 5500, 9: 5500, 10: 6500, 11: 750
 SRGB_XYZ_TO_RGB = [[3.2404542, -1.5371385, -0.4985314], [-0.9692660, 1.8760108, 0.0415560], [0.0556434, -0.2040259, 1.0572252]]
 
 
+# Headerless sensor dumps, known only by their exact size (dcraw's table, patched for the SJCAM by Dave Coffin):
+# size -> make, model, width, height, CFA (R0 G1 B2, row by row), black levels to choose between, white,
+# XYZ->camera matrix ×10000. LibRaw takes the SJCAM's size for a Kodak format and decodes nonsense.
+HEADERLESS = {
+    18000000: dict(make='SJCAM', model='SJ5000x', W=4000, H=3000, pattern=(0, 1, 1, 2), blacks=(0, 205), white=4095,
+                   matrix=(10264, -2851, -769, -1966, 10069, 1898, -303, 1846, 4557)),
+}
+
+
+def headerless(path):
+    """The HEADERLESS entry for a .RAW file of a known size, or None."""
+    if os.path.splitext(path)[1].lower() != '.raw': return None
+    try:
+        return HEADERLESS.get(os.path.getsize(path))
+    except OSError:
+        return None
+
+
+def read_headerless(path, spec):
+    """12-bit little-endian packed (two pixels in three bytes: low 12 bits first), as dcraw's packed_load_raw
+    reads these with load_flags 80. -> uint16 H × W."""
+    b = np.fromfile(path, np.uint8, spec['W'] * spec['H'] * 3 // 2).reshape(-1, 3).astype(np.uint16)
+    out = np.empty((len(b), 2), np.uint16)
+    out[:, 0] = b[:, 0] | (b[:, 1] & 0xF) << 8
+    out[:, 1] = b[:, 1] >> 4 | b[:, 2] << 4
+    return out.reshape(spec['H'], spec['W'])
+
+
+def headerless_black(raw, blacks):
+    """Firmware that subtracts the black level itself clips the shadows at 0 (the SJCAM after its 2018 update);
+    older firmware leaves them around the black level. Pick from the data; with no shadows to judge, 0."""
+    if len(blacks) == 1: return blacks[0]
+    hi = max(blacks)
+    s = raw[::3, ::3]
+    below = np.count_nonzero(s < hi * 0.7) / s.size
+    near = np.count_nonzero(s < hi * 1.3) / s.size
+    return hi if below < 1e-5 and near > 1e-3 else min(blacks)
+
+
 class RawFile:
     """A RAW file's mosaic and metadata, read with LibRaw (rawpy) the way the web app reads it with libraw-wasm."""
     def __init__(self, path):
-        import rawpy
         self.path = path
+        self.warnings = []
+        spec = headerless(path)
+        if spec:
+            self._init_headerless(spec)
+            return
+        import rawpy
         with open(path, 'rb') as f:
             buf = f.read()
-        self.warnings = []
         with rawpy.imread(path) as r:
             pat = r.raw_pattern
             if pat is None or r.num_colors != 3:
@@ -648,6 +691,27 @@ class RawFile:
             self.black = [float(np.mean(p)) for p in per]
             self.black_source = 'DNG BlackLevel tag'
         if dng and dng.get('white'): self.white = float(dng['white'])
+        self._xt = {}
+
+    def _init_headerless(self, spec):
+        self.raw = read_headerless(self.path, spec)
+        self.H, self.W = self.raw.shape
+        self.is_xtrans, self.P = False, 2
+        self.pattern = np.array(spec['pattern'], np.int64)
+        b = float(headerless_black(self.raw, spec['blacks']))
+        self.black, self.white = [b, b, b], float(spec['white'])
+        self.black_source = ('estimated: the camera subtracted it' if b == 0 else 'estimated: older firmware') \
+            if len(spec['blacks']) > 1 else 'dcraw table'
+        self.xyz_to_cam = np.array(spec['matrix'], float).reshape(3, 3) / 10000
+        self.matrix_source = 'dcraw (Dave Coffin)'
+        # no white balance in the file: daylight, from the matrix, as dcraw does then
+        c = self.xyz_to_cam @ XYZ_D65
+        self.wb = (c[1] / c).tolist()
+        self.warnings.append('No white balance in this file: daylight is used.')
+        self.flip, self.iso, self.shutter, self.aperture, self.focal, self.f35 = 0, 0.0, 0.0, 0.0, 0.0, 0
+        self.lens = self.lens_make = ''
+        self.make, self.model = spec['make'], spec['model']
+        self.thumb = None
         self._xt = {}
 
     def summary(self):

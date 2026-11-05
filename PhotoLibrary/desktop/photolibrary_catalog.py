@@ -40,6 +40,12 @@ RAW_EXTS = ('.nef', '.nrw', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.sr2', '.ra
 IMAGE_EXTS = ('.jpg', '.jpeg', '.jfif', '.png', '.tif', '.tiff', '.bmp', '.webp')
 SUPPORTED_EXTS = RAW_EXTS + IMAGE_EXTS
 THUMB_SIZES = (128, 512, 1024)
+# thumbnail formats: file extension, Pillow format, save options. At about the same fidelity as JPEG 88 (PSNR to the
+# original, measured on this library) WebP 85 is ~35% smaller and AVIF 65-70 ~45-50% smaller; both decode in < 20 ms.
+THUMB_FORMATS = {'jpeg': ('.jpg', 'JPEG', dict(optimize=True, progressive=True)),
+                 'webp': ('.webp', 'WEBP', dict(method=6)),
+                 'avif': ('.avif', 'AVIF', dict(speed=6))}
+THUMB_QUALITY = {'jpeg': 88, 'webp': 85, 'avif': 65}   # the defaults; thumbnails written before this were all jpeg88
 SKIP_DIRS = {'.venv', '.venv-linux', '__pycache__', '.git', '$recycle.bin', 'system volume information'}
 
 logging.getLogger('exifread').setLevel(logging.CRITICAL)   # it logs "File format not recognized" for RAF, CR3 …
@@ -179,6 +185,12 @@ def read_metadata(path, st=None):
     except Exception:
         tags = {}
     raw, exif_ok = None, len(tags) >= 5
+    hl = _headerless(path) if is_raw else None
+    if hl:   # a bare sensor dump (SJCAM .RAW): LibRaw mistakes it for another format, and there is no EXIF
+        m['make'], m['model'], m['width'], m['height'] = hl['make'], hl['model'], hl['W'], hl['H']
+        m['taken'], m['taken_src'] = datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M:%S'), 'file'
+        m['camera'] = camera_name(m['make'], m['model'])
+        return m
     if is_raw:
         try:
             import rawpy
@@ -320,8 +332,18 @@ def _open_image(path, want=1024):
         return Image.fromarray(E.display_image(rgb, want * 2))
 
 
+def _headerless(path):
+    """RAW Demosaic's entry for a headerless .RAW file (known by its size), or None."""
+    if not path.lower().endswith('.raw'): return None
+    try:
+        return engine().headerless(path)
+    except Exception:
+        return None
+
+
 def _raw_preview(path, min_side):
     """A RAW file's embedded JPEG preview, oriented, if its long side is at least min_side (else None)."""
+    if _headerless(path): return None   # no preview in a bare sensor dump
     import rawpy
     with rawpy.imread(path) as r:
         try:
@@ -478,9 +500,13 @@ class Catalog:
             bad = c.execute("SELECT id, x0, y0, x1, y1 FROM faces WHERE typeof(x0) = 'blob'").fetchall()
             c.executemany('UPDATE faces SET x0 = ?, y0 = ?, x1 = ?, y1 = ? WHERE id = ?',
                           [tuple(float(np.frombuffer(v, np.float32)[0]) for v in r[1:]) + (r[0],) for r in bad])
-            if 'focus' not in {r[1] for r in c.execute('PRAGMA table_info(photos)')}:
+            cols = {r[1] for r in c.execute('PRAGMA table_info(photos)')}
+            if 'focus' not in cols:
                 c.execute('ALTER TABLE photos ADD COLUMN focus TEXT')   # catalogs made before focus points were read
+            if 'thumb_spec' not in cols:
+                c.execute('ALTER TABLE photos ADD COLUMN thumb_spec TEXT')   # format and quality, e.g. webp85 (NULL: jpeg88)
             c.commit()
+        self.thumb_fmt, self.thumb_q = 'jpeg', THUMB_QUALITY['jpeg']
 
     def conn(self):
         c = getattr(self._local, 'c', None)
@@ -510,19 +536,43 @@ class Catalog:
                 c.rollback()
                 raise
 
-    def thumb_path(self, pid, size):
-        return os.path.join(self.thumb_dir, f'{pid // 1000:04d}', f'{pid}_{size}.jpg')
+    def thumb_path(self, pid, size, fmt=None):
+        """Where the thumbnail is written in this format (default: the one thumbnails are made in now)."""
+        return os.path.join(self.thumb_dir, f'{pid // 1000:04d}', f'{pid}_{size}{THUMB_FORMATS[fmt or self.thumb_fmt][0]}')
+
+    def find_thumb(self, pid, size):
+        """The stored thumbnail of this size, in whichever format it was made (None if there is none)."""
+        for f in [self.thumb_fmt] + [f for f in THUMB_FORMATS if f != self.thumb_fmt]:
+            p = self.thumb_path(pid, size, f)
+            if os.path.exists(p): return p
+        return None
 
     def best_thumb(self, pid, px):
         """The smallest stored thumbnail at least px on its long side (else the biggest there is)."""
-        for s in THUMB_SIZES:
-            if s >= px:
-                p = self.thumb_path(pid, s)
-                if os.path.exists(p): return p
-        for s in reversed(THUMB_SIZES):
-            p = self.thumb_path(pid, s)
-            if os.path.exists(p): return p
+        for s in [s for s in THUMB_SIZES if s >= px] + list(reversed(THUMB_SIZES)):
+            p = self.find_thumb(pid, s)
+            if p: return p
         return None
+
+    def set_thumb_format(self, fmt, quality):
+        """The format and quality new (and recompressed) thumbnails are written in."""
+        self.thumb_fmt = fmt if fmt in THUMB_FORMATS else 'jpeg'
+        self.thumb_q = max(10, min(100, int(quality or THUMB_QUALITY[self.thumb_fmt])))
+
+    def thumb_spec(self):
+        return f'{self.thumb_fmt}{self.thumb_q}'
+
+    def _encode_thumbs(self, im, fmt=None, q=None):
+        """PIL RGB (long side <= 1024) -> {size: encoded bytes}, each size made from the next bigger one."""
+        fmt, q = fmt or self.thumb_fmt, q or self.thumb_q
+        _, pil, opts = THUMB_FORMATS[fmt]
+        out = {}
+        for s in reversed(THUMB_SIZES):
+            if max(im.size) > s: im = im.copy(); im.thumbnail((s, s), Image.LANCZOS)
+            b = io.BytesIO()
+            im.save(b, pil, quality=q if s > 128 else max(10, q - 3), **opts)
+            out[s] = b.getvalue()
+        return out
 
     # ─── roots and folders
     def roots(self):
@@ -694,6 +744,7 @@ class Catalog:
         threads = threads or max(2, min(20, (os.cpu_count() or 4) - 2))   # Pillow's decode and resize release the GIL
         rows = self.rows(ids, 'id, path, is_raw')
         ids = [i for i in ids if i in rows]
+        spec = self.thumb_spec()
         rcd_lock, count_lock = threading.Lock(), threading.Lock()
         t0, counter = time.time(), [0, 0]
         ready = []
@@ -715,12 +766,12 @@ class Catalog:
                     im, kind = render_thumbnail(r['path'], min_preview, rawdemosaic_dir)
                 if max(im.size) > 1024: im.thumbnail((1024, 1024), Image.LANCZOS)
                 self._write_thumbs(pid, im)
-                res = (1, kind)
+                res = (1, kind, spec)
             except Exception as ex:
-                res = (-1, None)
+                res = (-1, None, None)
                 job.log('err', f'{os.path.basename(r["path"])}: no thumbnail ({ex})')
             with self.tx() as c:
-                c.execute('UPDATE photos SET thumb = ?, thumb_src = ? WHERE id = ?', (res[0], res[1], pid))
+                c.execute('UPDATE photos SET thumb = ?, thumb_src = ?, thumb_spec = ? WHERE id = ?', (*res, pid))
             with count_lock:
                 counter[0] += 1
                 counter[1] += res[1] == 'rcd'
@@ -743,10 +794,114 @@ class Catalog:
         job.log('ok', f'{counter[0]} thumbnails made ({counter[1]} by RCD demosaic) in {time.time() - t0:.0f} s')
 
     def _write_thumbs(self, pid, im):
+        """Write the three sizes in the current format, then remove any in another format. -> bytes written."""
         os.makedirs(os.path.dirname(self.thumb_path(pid, 128)), exist_ok=True)
+        n = 0
+        for s, data in self._encode_thumbs(im).items():
+            p = self.thumb_path(pid, s)
+            with open(p + '.part', 'wb') as f:
+                f.write(data)
+            os.replace(p + '.part', p)
+            n += len(data)
+        for f in THUMB_FORMATS:
+            if f != self.thumb_fmt:
+                for s in THUMB_SIZES:
+                    try: os.remove(self.thumb_path(pid, s, f))
+                    except OSError: pass
+        return n
+
+    def _thumb_bytes(self, pid):
+        """Bytes on disk of a photo's thumbnails, every format."""
+        n = 0
+        for f in THUMB_FORMATS:
+            for s in THUMB_SIZES:
+                try: n += os.path.getsize(self.thumb_path(pid, s, f))
+                except OSError: pass
+        return n
+
+    def thumbs_on_disk(self):
+        """(bytes, files) of the whole thumbnails folder."""
+        n = k = 0
+        if not os.path.isdir(self.thumb_dir): return 0, 0
+        for d in os.scandir(self.thumb_dir):
+            if d.is_dir():
+                for e in os.scandir(d.path):
+                    if e.is_file(): n += e.stat().st_size; k += 1
+        return n, k
+
+    def _thumb_source(self, pid):
+        """The biggest stored thumbnail of a photo, decoded (to re-encode it), or None."""
         for s in reversed(THUMB_SIZES):
-            if max(im.size) > s: im = im.copy(); im.thumbnail((s, s), Image.LANCZOS)
-            im.save(self.thumb_path(pid, s), 'JPEG', quality=88 if s > 128 else 85, optimize=True)
+            p = self.find_thumb(pid, s)
+            if p:
+                with Image.open(p) as im:
+                    return im.convert('RGB')
+        return None
+
+    def estimate_thumbs(self, fmt, quality, sample=60):
+        """What recompressing every thumbnail to fmt/quality would save, from a random sample.
+        -> dict(bytes, files, ratio, estimate, sample, todo)."""
+        ids = [r[0] for r in self.q('SELECT id FROM photos WHERE thumb = 1 ORDER BY random() LIMIT ?', (sample,))]
+        old = new = 0
+        for pid in ids:
+            im = self._thumb_source(pid)
+            if im is None: continue
+            old += self._thumb_bytes(pid)
+            new += sum(len(b) for b in self._encode_thumbs(im, fmt, quality).values())
+        n, k = self.thumbs_on_disk()
+        ratio = new / old if old else 1.0
+        spec = f'{fmt}{quality}'
+        todo = self.q1("SELECT COUNT(*) FROM photos WHERE thumb = 1 AND COALESCE(thumb_spec, 'jpeg88') != ?", (spec,))[0]
+        return dict(bytes=n, files=k, ratio=ratio, estimate=n * ratio, sample=len(ids), todo=todo)
+
+    def recompress_thumbs(self, job, threads=None):
+        """Re-encode every thumbnail not already in the current format and quality, from its own biggest size (the
+        originals are not needed). Stops cleanly when cancelled; running it again carries on. -> (photos, before, after)."""
+        threads = threads or max(2, min(20, (os.cpu_count() or 4) - 2))
+        spec = self.thumb_spec()
+        ids = [r[0] for r in self.q("SELECT id FROM photos WHERE thumb = 1 AND COALESCE(thumb_spec, 'jpeg88') != ?", (spec,))]
+        if not ids: return 0, 0, 0
+        t0, lock, done, sizes = time.time(), threading.Lock(), [], [0, 0]
+
+        def one(pid):
+            if job.cancel_event.is_set(): return
+            try:
+                before = self._thumb_bytes(pid)
+                im = self._thumb_source(pid)
+                if im is None: return
+                after = self._write_thumbs(pid, im)
+            except Exception as ex:
+                job.log('err', f'photo {pid}: thumbnail not recompressed ({ex})')
+                return
+            with lock:
+                done.append(pid); sizes[0] += before; sizes[1] += after
+
+        def save(batch):
+            with self.tx() as c:
+                c.executemany('UPDATE photos SET thumb_spec = ? WHERE id = ?', [(spec, p) for p in batch])
+
+        with ThreadPoolExecutor(threads) as ex:
+            futs = [ex.submit(one, i) for i in ids]
+            last, saved = 0, 0
+            for k, f in enumerate(futs):
+                f.result()
+                if time.time() - last > 0.5 or k == len(futs) - 1:
+                    last = time.time()
+                    with lock:
+                        batch = done[saved:]; saved = len(done); b0, b1 = sizes
+                    if batch: save(batch)
+                    job.progress((k + 1) / len(futs), f'Recompressing thumbnails {k + 1}/{len(futs)}'
+                                 + (f' — {fmt_bytes(b0)} → {fmt_bytes(b1)}' if b0 else '') + _eta(t0, k + 1, len(futs)))
+                if job.cancel_event.is_set():
+                    for g in futs: g.cancel()
+                    break
+        with lock:
+            batch = done[saved:]
+        if batch: save(batch)
+        job.log('ok', f'{len(done)} photos\' thumbnails recompressed to {spec}: {fmt_bytes(sizes[0])} → {fmt_bytes(sizes[1])} '
+                      f'in {time.time() - t0:.0f} s' + (' (stopped: run it again to carry on)' if job.cancel_event.is_set() else ''))
+        if job.cancel_event.is_set(): raise Cancelled()
+        return len(done), sizes[0], sizes[1]
 
     def forget_missing(self):
         ids = [r['id'] for r in self.q('SELECT id FROM photos WHERE missing = 1')]
@@ -758,9 +913,10 @@ class Catalog:
 
     def _delete_thumbs(self, ids):
         for pid in ids:
-            for s in THUMB_SIZES:
-                try: os.remove(self.thumb_path(pid, s))
-                except OSError: pass
+            for f in THUMB_FORMATS:
+                for s in THUMB_SIZES:
+                    try: os.remove(self.thumb_path(pid, s, f))
+                    except OSError: pass
 
     # ─── photos that were moved
     def find_moved(self, folder, job, threads=8):
@@ -1020,6 +1176,10 @@ def _safe_meta(fp, st):
                  camera='', lens='', focal=None, focal35=None, aperture=None, exposure=None, iso=None, lat=None, lon=None, alt=None,
                  focus=None)
         return m
+
+
+def fmt_bytes(n):
+    return f'{n / 2 ** 30:.2f} GB' if n >= 2 ** 30 else f'{n / 2 ** 20:.1f} MB' if n >= 2 ** 20 else f'{n / 1024:.0f} KB'
 
 
 def _eta(t0, done, total):
