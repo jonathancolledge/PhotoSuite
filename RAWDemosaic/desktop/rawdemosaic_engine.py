@@ -549,10 +549,11 @@ SRGB_XYZ_TO_RGB = [[3.2404542, -1.5371385, -0.4985314], [-0.9692660, 1.8760108, 
 
 # Headerless sensor dumps, known only by their exact size (dcraw's table, patched for the SJCAM by Dave Coffin):
 # size -> make, model, width, height, CFA (R0 G1 B2, row by row), black levels to choose between, white,
-# XYZ->camera matrix ×10000. LibRaw takes the SJCAM's size for a Kodak format and decodes nonsense.
+# XYZ->camera matrix ×10000, lens distortion (a, b, c of ImageMagick's -distort barrel, measured with Hugin).
+# LibRaw takes the SJCAM's size for a Kodak format and decodes nonsense.
 HEADERLESS = {
     18000000: dict(make='SJCAM', model='SJ5000x', W=4000, H=3000, pattern=(0, 1, 1, 2), blacks=(0, 205), white=4095,
-                   matrix=(10264, -2851, -769, -1966, 10069, 1898, -303, 1846, 4557)),
+                   matrix=(10264, -2851, -769, -1966, 10069, 1898, -303, 1846, 4557), distortion=(0.06322, -0.15723, -0.25225)),
 }
 
 
@@ -591,6 +592,7 @@ class RawFile:
     def __init__(self, path):
         self.path = path
         self.warnings = []
+        self.distortion = None   # a built-in lens profile (see HEADERLESS); Develop's Lensfun covers the others
         spec = headerless(path)
         if spec:
             self._init_headerless(spec)
@@ -711,6 +713,7 @@ class RawFile:
         self.flip, self.iso, self.shutter, self.aperture, self.focal, self.f35 = 0, 0.0, 0.0, 0.0, 0.0, 0
         self.lens = self.lens_make = ''
         self.make, self.model = spec['make'], spec['model']
+        self.distortion = spec.get('distortion')
         self.thumb = None
         self._xt = {}
 
@@ -761,6 +764,44 @@ def quick_region(src):
     W, H = src.W, src.H
     tw, th = min(W, 1536), min(H, 1020)
     return (H - th) // 2 // 6 * 6, (W - tw) // 2 // 6 * 6, th, tw
+
+
+# ───────────────────────────────────────────── built-in lens profiles
+def barrel_maps(abc, H, W, region=None):
+    """ImageMagick's -distort barrel "a b c" (the PanoTools lens model Hugin measures): an output pixel at radius r
+    from the centre, in units of half the shorter side, shows the input at r·(a·r³ + b·r² + c·r + d), d = 1 - a - b - c.
+    -> float32 (map_x, map_y): where in the H × W input each pixel of region (y0, x0, h, w; default all) samples."""
+    a, b, c = abc
+    d = 1 - a - b - c
+    y0, x0, h, w = region or (0, 0, H, W)
+    s = min(W, H) / 2
+    x = ((np.arange(x0, x0 + w, dtype=np.float32) + 0.5 - W / 2) / s)[None, :]
+    y = ((np.arange(y0, y0 + h, dtype=np.float32) + 0.5 - H / 2) / s)[:, None]
+    r = np.hypot(x, y)
+    f = ((a * r + b) * r + c) * r + d
+    f *= s
+    return x * f + np.float32(W / 2 - 0.5), y * f + np.float32(H / 2 - 0.5)
+
+
+def distorted_region(abc, H, W, region, P=6):
+    """The part of the uncorrected frame that region of the corrected one is made from (CFA-aligned, with a margin
+    for the interpolation), as (y0, x0, h, w)."""
+    mx, my = barrel_maps(abc, H, W, region)
+    y0 = max(0, int(my.min()) - 4) // P * P; x0 = max(0, int(mx.min()) - 4) // P * P
+    y1 = min(H, int(my.max()) + 6); x1 = min(W, int(mx.max()) + 6)
+    return y0, x0, y1 - y0, x1 - x0
+
+
+def correct_distortion(img, abc, full_hw=None, region=None, at=(0, 0)):
+    """Linear float32 H × W × 3 -> the barrel correction, the same size. For a quick preview img is only the part of
+    a full_hw frame that starts at `at`, and region the part of the corrected frame wanted."""
+    import cv2
+    H, W = full_hw or img.shape[:2]
+    mx, my = barrel_maps(abc, H, W, region)
+    if at[0]: my -= at[0]
+    if at[1]: mx -= at[1]
+    out = cv2.remap(np.ascontiguousarray(img, np.float32), mx, my, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return np.maximum(out, 0, out=out)
 
 
 def open_input(path):
@@ -1473,10 +1514,11 @@ def output_suffixes(opts, n_columns=0):
     return sfx
 
 
-def quick_preview(src, max_side=1600):
+def quick_preview(src, max_side=1600, lens=True):
     """A small view of a RAW with no usable embedded preview, as the web app makes it: the mosaic is box-averaged
     by a multiple of the pattern size (each output pixel keeps its CFA colour), then RCD-demosaiced (Bayer) or
-    each colour averaged over the block (X-Trans). Returns sRGB uint8 in display orientation."""
+    each colour averaged over the block (X-Trans). lens: apply a built-in lens profile. Returns sRGB uint8 in
+    display orientation."""
     raw, P = src.raw, src.P
     H, W = raw.shape
     f = P * max(1, int(math.floor(max(W, H) / (max_side * P) + 0.5)))
@@ -1501,6 +1543,7 @@ def quick_preview(src, max_side=1600):
             m = (cfa == c).astype(np.float32)
             cam[..., c] = np.maximum(0, np.einsum('yixj,ij->yx', block, m) / m.sum() - src.black[c]) * scale
         cam = np.minimum(1, cam * wb)
+    if lens and src.distortion: cam = correct_distortion(cam, src.distortion)
     apply_matrix(cam, cam_to_working(src.xyz_to_cam), out=cam)
     np.maximum(cam, 0, out=cam)
     return display_image(orient(cam, src.flip), 0)
@@ -1518,7 +1561,10 @@ def process(src, columns, opts, models, job, quick=False, on_column=None):
     if src.is_rgb:
         for c in cols: c['rawDenoise'] = 'none'
     region = quick_region(src) if quick else None
-    src_c = _CropView(src, region) if region else src
+    dist = None if src.is_rgb or not opts.get('lens_correct', True) else src.distortion
+    src_region = distorted_region(dist, src.H, src.W, region) if dist and region else region
+    src_c = _CropView(src, src_region) if src_region else src
+    if dist: job.log('info', f'lens distortion corrected (built-in {src.make} {src.model} profile)')
     mosaic, cam_to_work = None, None
     if not src.is_rgb:
         cam_to_work = cam_to_working(src.xyz_to_cam)
@@ -1537,6 +1583,7 @@ def process(src, columns, opts, models, job, quick=False, on_column=None):
         job.log('info', f'column {ci + 1}: {col["name"]} ({describe_column(col, is_xt, src.is_rgb)})')
         tc = time.time()
         work = run_column(col, src_c, mosaic, cam_to_work, models, job)
+        if dist: work = correct_distortion(work, dist, (src.H, src.W), region, src_region[:2] if src_region else (0, 0))
         job.log('ok', f'column {ci + 1} done in {time.time() - tc:.1f} s')
         flip = 0 if src.is_rgb else src.flip
         oriented = orient(work, flip)

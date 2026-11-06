@@ -84,6 +84,17 @@ class Cancelled(Exception):
     pass
 
 
+class DiskFull(Exception):
+    def __init__(self, folder):
+        super().__init__(f'The disk holding the thumbnails is full ({folder}), so making them stopped. Free some space, '
+                         'then Settings & AI → Thumbnails → Rebuild thumbnails from the originals… → Missing ones makes the rest.')
+
+
+def _disk_full(ex):
+    import errno
+    return isinstance(ex, OSError) and ex.errno == errno.ENOSPC
+
+
 class Job:
     """Progress/log sink handed to long operations. All methods are safe to call from a worker thread."""
     def __init__(self, log=None, progress=None, post=None):
@@ -387,6 +398,7 @@ def _raw_rcd(path, rawdemosaic_dir=None):
         cam = E.DM.DEMOSAICS['rcd'](wm, src.pattern)
         del wm
     np.minimum(cam, 1, out=cam)
+    if getattr(src, 'distortion', None): cam = E.correct_distortion(cam, src.distortion)   # RAW Demosaic's built-in lens profiles
     E.apply_matrix(cam, E.cam_to_working(src.xyz_to_cam), out=cam)
     np.maximum(cam, 0, out=cam)
     cam = E.orient(cam, src.flip)
@@ -395,8 +407,73 @@ def _raw_rcd(path, rawdemosaic_dir=None):
     return im
 
 
+def _raw_libraw(path):
+    """LibRaw's own processing (camera white balance, no brightening), for what RAW Demosaic's engine does not
+    demosaic: linear DNGs (already demosaiced, as Lightroom's Enhance, DxO and Topaz write them) and other sensors."""
+    import rawpy
+    with rawpy.imread(path) as r:
+        a = r.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=8)
+    im = Image.fromarray(a)
+    im.thumbnail((1024, 1024), Image.LANCZOS)
+    return im
+
+
+_ORIENT = {2: Image.FLIP_LEFT_RIGHT, 3: Image.ROTATE_180, 4: Image.FLIP_TOP_BOTTOM, 5: Image.TRANSPOSE,
+           6: Image.ROTATE_270, 7: Image.TRANSVERSE, 8: Image.ROTATE_90}
+
+
+def _tiff_preview(path):
+    """The biggest RGB or JPEG image stored in a TIFF-based RAW (a DNG's previews), whatever its size, read without
+    LibRaw (for files it rejects), or None."""
+    import tifffile
+    with tifffile.TiffFile(path) as tf:
+        pages, todo = [], list(tf.pages)
+        while todo:
+            p = todo.pop()
+            pages.append(p)
+            try: todo += list(p.pages or [])   # SubIFDs
+            except Exception: pass
+        cands = sorted((p for p in pages if p.photometric in (2, 6) and p.samplesperpixel >= 3),
+                       key=lambda p: -p.imagewidth * p.imagelength)
+        orient = tf.pages[0].tags.valueof(274, 1)
+        im = None
+        for p in cands:
+            try:
+                if p.compression == 7 and len(p.dataoffsets) == 1:   # a whole JPEG stream
+                    tf.filehandle.seek(p.dataoffsets[0])
+                    im = Image.open(io.BytesIO(tf.filehandle.read(p.databytecounts[0])))
+                    im.draft('RGB', (1024, 1024))
+                    im = im.convert('RGB')
+                else:
+                    a = p.asarray()[..., :3]
+                    if a.dtype != np.uint8: a = (a / max(1, a.max()) * 255).astype(np.uint8)
+                    im = Image.fromarray(a)
+                break
+            except Exception:
+                im = None
+    if im is None: return None
+    if orient in _ORIENT: im = im.transpose(_ORIENT[orient])
+    return im
+
+
+def _raw_fallback(path, why):
+    """A RAW file the engine could not demosaic: LibRaw's processing, else its embedded preview however small.
+    -> (PIL image, kind); re-raises why when nothing works."""
+    try:
+        return _raw_libraw(path), 'libraw'
+    except Exception:
+        pass
+    for get in (lambda: _raw_preview(path, 0), lambda: _tiff_preview(path)):
+        try:
+            im = get()
+            if im is not None: return im, 'preview'
+        except Exception:
+            pass
+    raise why
+
+
 def render_thumbnail(path, min_preview=1024, rawdemosaic_dir=None):
-    """-> (PIL RGB image, long side <= 1024 unless the photo is smaller, source: 'image' | 'preview' | 'rcd')."""
+    """-> (PIL RGB image, long side <= 1024 unless the photo is smaller, source: 'image' | 'preview' | 'rcd' | 'libraw')."""
     if os.path.splitext(path)[1].lower() in RAW_EXTS:
         im = None
         if min_preview is not None:
@@ -406,7 +483,10 @@ def render_thumbnail(path, min_preview=1024, rawdemosaic_dir=None):
                 im = None
         kind = 'preview'
         if im is None:
-            im, kind = _raw_rcd(path, rawdemosaic_dir), 'rcd'
+            try:
+                im, kind = _raw_rcd(path, rawdemosaic_dir), 'rcd'
+            except Exception as ex:
+                im, kind = _raw_fallback(path, ex)
     else:
         im, kind = _open_image(path), 'image'
     if max(im.size) > 1024:
@@ -434,7 +514,7 @@ CREATE TABLE IF NOT EXISTS photos (
     description TEXT NOT NULL DEFAULT '',
     caption TEXT NOT NULL DEFAULT '',
     thumb INTEGER NOT NULL DEFAULT 0,      -- 0 to do, 1 done, -1 failed
-    thumb_src TEXT,                        -- image | preview | rcd
+    thumb_src TEXT,                        -- image | preview | rcd | libraw
     focus TEXT,                            -- where the camera focused (focuspoints.py JSON); '' none, NULL not read yet
     ai INTEGER NOT NULL DEFAULT 0,         -- bits: 1 faces, 2 image embedding, 4 caption
     missing INTEGER NOT NULL DEFAULT 0,
@@ -747,10 +827,10 @@ class Catalog:
         spec = self.thumb_spec()
         rcd_lock, count_lock = threading.Lock(), threading.Lock()
         t0, counter = time.time(), [0, 0]
-        ready = []
+        ready, full = [], []
 
         def one(pid):
-            if job.cancel_event.is_set(): return
+            if job.cancel_event.is_set() or full: return
             r = rows[pid]
             try:
                 im, kind = None, 'preview'
@@ -768,6 +848,8 @@ class Catalog:
                 self._write_thumbs(pid, im)
                 res = (1, kind, spec)
             except Exception as ex:
+                if _disk_full(ex):   # not this photo's fault: leave it to be made later, and stop
+                    full.append(ex); return
                 res = (-1, None, None)
                 job.log('err', f'{os.path.basename(r["path"])}: no thumbnail ({ex})')
             with self.tx() as c:
@@ -788,6 +870,9 @@ class Catalog:
                     with count_lock:
                         batch = ready[:]; ready.clear()
                     if batch: job.post('thumbs', batch)
+                if full:
+                    for g in futs: g.cancel()
+                    raise DiskFull(self.thumb_dir)
                 if job.cancel_event.is_set():
                     for g in futs: g.cancel()
                     raise Cancelled()
@@ -799,9 +884,14 @@ class Catalog:
         n = 0
         for s, data in self._encode_thumbs(im).items():
             p = self.thumb_path(pid, s)
-            with open(p + '.part', 'wb') as f:
-                f.write(data)
-            os.replace(p + '.part', p)
+            try:
+                with open(p + '.part', 'wb') as f:
+                    f.write(data)
+                os.replace(p + '.part', p)
+            except BaseException:
+                try: os.remove(p + '.part')
+                except OSError: pass
+                raise
             n += len(data)
         for f in THUMB_FORMATS:
             if f != self.thumb_fmt:
@@ -861,16 +951,17 @@ class Catalog:
         spec = self.thumb_spec()
         ids = [r[0] for r in self.q("SELECT id FROM photos WHERE thumb = 1 AND COALESCE(thumb_spec, 'jpeg88') != ?", (spec,))]
         if not ids: return 0, 0, 0
-        t0, lock, done, sizes = time.time(), threading.Lock(), [], [0, 0]
+        t0, lock, done, sizes, full = time.time(), threading.Lock(), [], [0, 0], []
 
         def one(pid):
-            if job.cancel_event.is_set(): return
+            if job.cancel_event.is_set() or full: return
             try:
                 before = self._thumb_bytes(pid)
                 im = self._thumb_source(pid)
                 if im is None: return
                 after = self._write_thumbs(pid, im)
             except Exception as ex:
+                if _disk_full(ex): full.append(ex); return
                 job.log('err', f'photo {pid}: thumbnail not recompressed ({ex})')
                 return
             with lock:
@@ -892,12 +983,13 @@ class Catalog:
                     if batch: save(batch)
                     job.progress((k + 1) / len(futs), f'Recompressing thumbnails {k + 1}/{len(futs)}'
                                  + (f' — {fmt_bytes(b0)} → {fmt_bytes(b1)}' if b0 else '') + _eta(t0, k + 1, len(futs)))
-                if job.cancel_event.is_set():
+                if job.cancel_event.is_set() or full:
                     for g in futs: g.cancel()
                     break
         with lock:
             batch = done[saved:]
         if batch: save(batch)
+        if full: raise DiskFull(self.thumb_dir)
         job.log('ok', f'{len(done)} photos\' thumbnails recompressed to {spec}: {fmt_bytes(sizes[0])} → {fmt_bytes(sizes[1])} '
                       f'in {time.time() - t0:.0f} s' + (' (stopped: run it again to carry on)' if job.cancel_event.is_set() else ''))
         if job.cancel_event.is_set(): raise Cancelled()
@@ -911,15 +1003,61 @@ class Catalog:
         if not r: return None
         return self.q1('SELECT COUNT(*) FROM photos WHERE missing = 0 AND id > ?', (int(r[0]),))[0]
 
-    def rebuild_all_thumbs(self, job, min_preview=1024, rawdemosaic_dir=None, restart=False, chunk=500):
-        """Make every photo's thumbnails afresh from its original, in the current format; nothing else about the photos
-        is touched. Goes by id in chunks and keeps the last chunk finished in meta, so after Cancel running it again
-        carries on (restart=True begins again). Missing photos keep the thumbnails they have. -> photos done."""
-        with self.tx() as c:
-            if restart: c.execute('DELETE FROM meta WHERE key = ?', (self.REBUILD_KEY,))
-            c.execute('INSERT OR IGNORE INTO meta (key, value) VALUES (?, 0)', (self.REBUILD_KEY,))
-        upto = int(self.q1('SELECT value FROM meta WHERE key = ?', (self.REBUILD_KEY,))[0])
-        ids = [r[0] for r in self.q('SELECT id FROM photos WHERE missing = 0 AND id > ? ORDER BY id', (upto,))]
+    def thumb_files(self):
+        """One walk of the thumbnails folder -> ({photo id: sizes on disk, any format}, [unfinished .part files])."""
+        have, parts = defaultdict(set), []
+        exts = {e for e, _, _ in THUMB_FORMATS.values()}
+        if not os.path.isdir(self.thumb_dir): return have, parts
+        for d in os.scandir(self.thumb_dir):
+            if not d.is_dir(): continue
+            for e in os.scandir(d.path):
+                stem, ext = os.path.splitext(e.name)
+                if ext == '.part': parts.append(e.path); continue
+                if ext not in exts: continue
+                try: pid, s = map(int, stem.split('_'))
+                except ValueError: continue
+                have[pid].add(s)
+        return have, parts
+
+    def thumbs_to_redo(self, have=None):
+        """The photos on disk whose thumbnails a rebuild would redo, by id order:
+        dict(missing=[never made, failed, or a size not on disk], format=[those, and the ones not in the current
+        format and quality], all=[every photo])."""
+        if have is None: have = self.thumb_files()[0]
+        full, spec = set(THUMB_SIZES), self.thumb_spec()
+        out = dict(missing=[], format=[], all=[])
+        for pid, t, s in self.q("SELECT id, thumb, COALESCE(thumb_spec, 'jpeg88') FROM photos WHERE missing = 0 ORDER BY id"):
+            out['all'].append(pid)
+            if t != 1 or not full <= have.get(pid, set()):
+                out['missing'].append(pid); out['format'].append(pid)
+            elif s != spec:
+                out['format'].append(pid)
+        return out
+
+    def rebuild_counts(self):
+        """For the rebuild dialog: dict(missing, format, all: photos; parts: unfinished files; left: see rebuild_left)."""
+        have, parts = self.thumb_files()
+        return dict({k: len(v) for k, v in self.thumbs_to_redo(have).items()}, parts=len(parts), left=self.rebuild_left())
+
+    def rebuild_thumbs(self, which, job, min_preview=1024, rawdemosaic_dir=None, restart=False, chunk=500):
+        """Make thumbnails afresh from the originals, in the current format; nothing else about the photos is touched.
+        which: 'missing', 'format' or 'all' (see thumbs_to_redo); missing photos keep the thumbnails they have.
+        Unfinished (.part) files are removed first. After Cancel (or a full disk), running it again carries on:
+        'missing' and 'format' by what is still to do, 'all' from the last chunk finished, kept in meta
+        (restart=True begins again). -> photos done."""
+        have, parts = self.thumb_files()
+        for p in parts:
+            try: os.remove(p)
+            except OSError: pass
+        if parts: job.log('info', f'{len(parts):,} unfinished thumbnail files removed')
+        if which == 'all':
+            with self.tx() as c:
+                if restart: c.execute('DELETE FROM meta WHERE key = ?', (self.REBUILD_KEY,))
+                c.execute('INSERT OR IGNORE INTO meta (key, value) VALUES (?, 0)', (self.REBUILD_KEY,))
+            upto = int(self.q1('SELECT value FROM meta WHERE key = ?', (self.REBUILD_KEY,))[0])
+            ids = [r[0] for r in self.q('SELECT id FROM photos WHERE missing = 0 AND id > ? ORDER BY id', (upto,))]
+        else:
+            ids = self.thumbs_to_redo(have)[which]
         t0, n = time.time(), len(ids)
         for k in range(0, n, chunk):
             part = ids[k:k + chunk]
@@ -930,10 +1068,12 @@ class Catalog:
             sub = Job(log=lambda lvl, msg: lvl != 'ok' and job.log(lvl, msg), progress=progress, post=job.post)
             sub.cancel_event = job.cancel_event
             self.make_thumbnails(part, sub, min_preview, rawdemosaic_dir)   # raises Cancelled: this chunk is redone next time
+            if which == 'all':
+                with self.tx() as c:
+                    c.execute('UPDATE meta SET value = ? WHERE key = ?', (part[-1], self.REBUILD_KEY))
+        if which == 'all':
             with self.tx() as c:
-                c.execute('UPDATE meta SET value = ? WHERE key = ?', (part[-1], self.REBUILD_KEY))
-        with self.tx() as c:
-            c.execute('DELETE FROM meta WHERE key = ?', (self.REBUILD_KEY,))
+                c.execute('DELETE FROM meta WHERE key = ?', (self.REBUILD_KEY,))
         job.log('ok', f'{n:,} photos\' thumbnails rebuilt from the originals as {self.thumb_spec()} in {time.time() - t0:.0f} s')
         return n
 

@@ -699,29 +699,49 @@ class App:
                       done=lambda r: (self.refresh_settings_info(), self.thumb_est_lbl.configure(
                           text=f'{r[0]:,} photos recompressed: {L.fmt_bytes(r[1])} → {L.fmt_bytes(r[2])}.') if r and r[0] else None))
 
-    def rebuild_all_thumbs(self):
+    def rebuild_thumbs_dialog(self):
         self._thumb_format_changed()
+        self.run_task('Counting thumbnails', lambda job: self.cat.rebuild_counts(), done=self._rebuild_dialog)
+
+    def _rebuild_dialog(self, n):
         name = f'{label_of(THUMB_FORMAT_LABELS, self.cat.thumb_fmt).split(" —")[0]} {self.cat.thumb_q}'
-        left, restart = self.cat.rebuild_left(), False
-        n = self.cat.q1('SELECT COUNT(*) FROM photos WHERE missing = 0')[0]
-        if not n:
+        if not n['all']:
             messagebox.showinfo(APP, 'No catalogued photo is on disk.'); return
-        if left:
-            ans = messagebox.askyesnocancel(APP, f'A rebuild of every thumbnail was stopped with {left:,} photos still to do.\n\n'
-                                                 f'Yes: carry on with those {left:,}.\nNo: start again with all {n:,}.')
-            if ans is None: return
-            restart = not ans
+        w = tk.Toplevel(self.root, bg=C['card'], padx=14, pady=12)
+        w.title('Rebuild thumbnails'); w.transient(self.root)
+        ttk.Label(w, text='Rebuild thumbnails from the originals', style='Big.TLabel').pack(anchor='w')
+        ttk.Label(w, text=f'Thumbnails are made afresh from each photo, as {name}. Only the thumbnails are redone: ratings, tags, '
+                          'descriptions, faces and the rest are untouched, and each photo keeps its old thumbnails until its new '
+                          'ones are written. Photos that are missing keep theirs.',
+                  style='Muted.TLabel', wraplength=int(440 * self.ui_scale), justify='left').pack(anchor='w', pady=(4, 8))
+        ph = lambda k: f'{k:,} photo' + ('' if k == 1 else 's')
+        parts = f'; {n["parts"]:,} unfinished file{"" if n["parts"] == 1 else "s"} cleared away' if n['parts'] else ''
+        choices = [('missing', f'Missing ones: {ph(n["missing"])} (never made, failed, or not all on disk{parts})'),
+                   ('format', f'Not {name} yet: {ph(n["format"])} (the missing ones too)')]
+        if n['left']:
+            choices += [('carry', f'All, carrying on the rebuild that was stopped: {ph(n["left"])} still to do'),
+                        ('all', f'All, starting again: {ph(n["all"])}')]
         else:
-            restart = True
-            if not messagebox.askyesno(APP, f'Make the thumbnails of all {n:,} photos afresh from the originals, as {name}?\n\n'
-                                            'Only the thumbnails are redone: ratings, tags, descriptions, faces and the rest are '
-                                            'untouched, and each photo keeps its old thumbnails until its new ones are written. '
-                                            'Photos that are missing keep theirs.\n\n'
-                                            'It reads every original (RAW files can be demosaiced), so it is much slower than '
-                                            'Recompress. Cancel stops it at any point; running it again offers to carry on.'): return
-        min_prev, rd = self.min_preview(), self.rd_dir.get().strip()
-        self.run_task('Rebuilding thumbnails', lambda job: self.cat.rebuild_all_thumbs(job, min_prev, rd, restart),
-                      done=lambda r: self.refresh_settings_info())
+            choices += [('all', f'All: {ph(n["all"])}')]
+        pick = tk.StringVar(value='missing' if n['missing'] or not n['format'] else 'format')
+        for k, text in choices:
+            ttk.Radiobutton(w, text=text, value=k, variable=pick, style='Card.TRadiobutton').pack(anchor='w', pady=1)
+        ttk.Label(w, text='Each photo\'s original is read (RAW files may be demosaiced), so this is much slower than Recompress. '
+                          'Cancel stops it at any point; doing it again carries on where it stopped.',
+                  style='Muted.TLabel', wraplength=int(440 * self.ui_scale), justify='left').pack(anchor='w', pady=(8, 0))
+
+        def go():
+            k = pick.get()
+            which, restart = ('all', False) if k == 'carry' else (k, True)
+            count = n['left'] if k == 'carry' else n[k]
+            w.destroy()
+            if not count and not n['parts']:
+                messagebox.showinfo(APP, 'There is nothing to rebuild.'); return
+            min_prev, rd = self.min_preview(), self.rd_dir.get().strip()
+            self.run_task('Rebuilding thumbnails', lambda job: self.cat.rebuild_thumbs(which, job, min_prev, rd, restart),
+                          done=lambda r: self.refresh_settings_info())
+        self._button_row(w, [('Rebuild', go), ('Cancel', w.destroy)], pady=(10, 0))
+        w.grab_set()
 
     # ─────────────────────────────── look
     def _style(self):
@@ -743,6 +763,8 @@ class App:
         st.configure('Status.TLabel', background=C['bg'], foreground=C['muted'], font=(UI_FONT, 9))
         st.configure('Card.TCheckbutton', background=C['card'], foreground=C['text'])
         st.map('Card.TCheckbutton', background=[('active', C['card'])], indicatorcolor=[('selected', C['accent']), ('!selected', C['input'])])
+        st.configure('Card.TRadiobutton', background=C['card'], foreground=C['text'])
+        st.map('Card.TRadiobutton', background=[('active', C['card'])], indicatorcolor=[('selected', C['accent']), ('!selected', C['input'])])
         st.configure('TButton', background=C['card2'], foreground=C['text'], padding=(10, 5), borderwidth=1)
         st.map('TButton', background=[('disabled', C['card']), ('active', C['border'])], foreground=[('disabled', C['muted'])])
         st.configure('Small.TButton', padding=(6, 2))
@@ -1165,7 +1187,7 @@ class App:
         sp.bind('<FocusOut>', lambda e: self._thumb_format_changed())
         sp.bind('<Return>', lambda e: self._thumb_format_changed())
         self._button_row(c, [('Estimate the saving', self.estimate_thumbs), ('Recompress existing thumbnails…', self.recompress_thumbs)])
-        self._button_row(c, [('Rebuild all thumbnails from the originals…', self.rebuild_all_thumbs)], pady=(4, 0))
+        self._button_row(c, [('Rebuild thumbnails from the originals…', self.rebuild_thumbs_dialog)], pady=(4, 0))
         self.thumb_est_lbl = ttk.Label(c, text='New thumbnails are saved this way. JPEG 88 is what was always used; WebP 85 and AVIF 65 look\n'
                                                'the same (as close to the photo) in about 65% and 50% of the space. Higher quality: bigger files.',
                                        style='Muted.TLabel', justify='left')
@@ -1654,7 +1676,7 @@ class App:
                    (f'{r["focal"]:g} mm' + (f' ({r["focal35"]:g} mm equiv.)' if r['focal35'] and abs(r['focal35'] - r['focal']) > 0.5 else '')) if r['focal'] else '']
             if any(exp): lines.append(' · '.join(x for x in exp if x))
             if r['width']: lines.append(f'{r["width"]} × {r["height"]} ({r["width"] * r["height"] / 1e6:.1f} MP) · {fmt_size(r["size"] or 0)}')
-            src = {'preview': 'embedded preview', 'rcd': 'RCD demosaic', 'image': 'the image'}.get(r['thumb_src'], 'not made yet' if r['thumb'] == 0 else 'failed')
+            src = {'preview': 'embedded preview', 'rcd': 'RCD demosaic', 'libraw': 'LibRaw', 'image': 'the image'}.get(r['thumb_src'], 'not made yet' if r['thumb'] == 0 else 'failed')
             lines.append(('RAW · ' if r['is_raw'] else '') + f'thumbnail from {src}')
             if r['lat'] is not None:
                 lines.append(f'GPS {r["lat"]:.5f}, {r["lon"]:.5f}' + (f', {r["alt"]:.0f} m' if r['alt'] is not None else ''))
