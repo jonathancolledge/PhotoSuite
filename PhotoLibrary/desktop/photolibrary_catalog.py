@@ -586,7 +586,7 @@ class Catalog:
             if 'thumb_spec' not in cols:
                 c.execute('ALTER TABLE photos ADD COLUMN thumb_spec TEXT')   # format and quality, e.g. webp85 (NULL: jpeg88)
             c.commit()
-        self.thumb_fmt, self.thumb_q = 'jpeg', THUMB_QUALITY['jpeg']
+        self.thumb_fmt, self.thumb_q = 'avif', THUMB_QUALITY['avif']
 
     def conn(self):
         c = getattr(self._local, 'c', None)

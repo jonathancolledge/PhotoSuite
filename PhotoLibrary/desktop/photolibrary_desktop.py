@@ -51,7 +51,7 @@ RATING_FILTER = [('Any', None), ('Unrated', 'unrated'), ('1★ or more', 1), ('2
                  ('4★ or more', 4), ('5★', 5)]
 THUMB_MODES = [('Embedded preview if 1024 px or more, else RCD', 1024), ('Embedded preview if 512 px or more, else RCD', 512),
                ('Any embedded preview, else RCD', 1), ('Always RCD demosaic', None)]
-THUMB_FORMAT_LABELS = [('JPEG — as always', 'jpeg'), ('WebP — about a third smaller', 'webp'), ('AVIF — about half the size', 'avif')]
+THUMB_FORMAT_LABELS = [('AVIF — about half the size of JPEG', 'avif'), ('WebP — about a third smaller than JPEG', 'webp'), ('JPEG — as before', 'jpeg')]
 GPS_FILTER = [('Any', None), ('With GPS', True), ('Without GPS', False)]
 KIND_FILTER = [('Any', None), ('RAW (any)', 'raw'), ('Not RAW', 'image')]   # + each catalogued file type
 SEARCH_MODES = ['Keywords', 'Meaning (AI)']
@@ -600,7 +600,7 @@ class App:
         self.settings = self._load_settings()
         s = self.settings
         self.cat = L.Catalog(s.get('library_dir') or L.DEFAULT_LIBRARY)
-        self.cat.set_thumb_format(s.get('thumb_format', 'jpeg'), s.get('thumb_quality'))
+        self.cat.set_thumb_format(s.get('thumb_format', 'avif'), s.get('thumb_quality'))
         self.ai = None
         self.loader = ThumbLoader(self.cat, self.q)
         self.scope = None                 # what the Browse trees point at
@@ -661,7 +661,7 @@ class App:
         return key_of(THUMB_MODES, self.thumb_mode.get(), 1024)
 
     def _thumb_format_changed(self, new_format=False):
-        fmt = key_of(THUMB_FORMAT_LABELS, self.thumb_fmt_lbl.get(), 'jpeg')
+        fmt = key_of(THUMB_FORMAT_LABELS, self.thumb_fmt_lbl.get(), 'avif')
         if new_format: self.thumb_q.set(str(L.THUMB_QUALITY[fmt]))   # each format's own sensible default
         try:
             q = int(float(self.thumb_q.get()))
@@ -1188,8 +1188,8 @@ class App:
         sp.bind('<Return>', lambda e: self._thumb_format_changed())
         self._button_row(c, [('Estimate the saving', self.estimate_thumbs), ('Recompress existing thumbnails…', self.recompress_thumbs)])
         self._button_row(c, [('Rebuild thumbnails from the originals…', self.rebuild_thumbs_dialog)], pady=(4, 0))
-        self.thumb_est_lbl = ttk.Label(c, text='New thumbnails are saved this way. JPEG 88 is what was always used; WebP 85 and AVIF 65 look\n'
-                                               'the same (as close to the photo) in about 65% and 50% of the space. Higher quality: bigger files.',
+        self.thumb_est_lbl = ttk.Label(c, text='New thumbnails are saved this way. AVIF 65 (the default) and WebP 85 look the same as the JPEG 88\n'
+                                               'used before, in about 50% and 65% of the space. Higher quality: bigger files.',
                                        style='Muted.TLabel', justify='left')
         self.thumb_est_lbl.pack(anchor='w', pady=(4, 0))
 
