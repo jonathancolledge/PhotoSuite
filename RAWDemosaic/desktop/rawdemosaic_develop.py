@@ -218,7 +218,7 @@ def canvas_dims(w, h, g):
     return (h, w) if g['rot90'] % 2 else (w, h)
 
 
-# lens model packed for Numba: [dist model (0 none, 1 ptlens, 2 poly3, 3 poly5), a, b, c, dA,
+# lens model packed for Numba: [dist model (0 none, 1 ptlens, 2 poly3, 3 poly5, 4 barrel), a, b, c, dA,
 #  tca mode (0 none, 1 linear, 2 poly3, 3 measured ca), t0..t5, vig on, k1, k2, k3, vA, uD, uV, uT]
 def pack_lens(lens, sc):
     P = np.zeros(22)
@@ -228,7 +228,7 @@ def pack_lens(lens, sc):
     vA = lens.get('vigAmt', 1) if lens.get('vigAmt') is not None else 1
     d = lens.get('dist')
     if d and dA:
-        P[0] = {'ptlens': 1, 'poly3': 2, 'poly5': 3}.get(d['model'], 0)
+        P[0] = {'ptlens': 1, 'poly3': 2, 'poly5': 3, 'barrel': 4}.get(d['model'], 0)
         P[1:4] = (list(d['terms']) + [0, 0, 0])[:3]
         P[4] = dA
     if lens.get('ca'):
@@ -257,6 +257,8 @@ def _dist(P, r):
         d = 1 - a; k = a / (d * d * d); base = 1 + k * r * r
     elif m == 3:
         base = 1 + a * r * r + b * r * r * r * r
+    elif m == 4:   # ImageMagick's -distort barrel (ptlens without the centre kept at scale 1): built-in profiles
+        base = ((a * r + b) * r + c) * r + 1 - a - b - c
     else:
         return 1.0
     return base if P[4] == 1 else 1 + (base - 1) * P[4]

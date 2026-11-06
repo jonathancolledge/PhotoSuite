@@ -592,7 +592,7 @@ class RawFile:
     def __init__(self, path):
         self.path = path
         self.warnings = []
-        self.distortion = None   # a built-in lens profile (see HEADERLESS); Develop's Lensfun covers the others
+        self.distortion = None   # a built-in lens profile (see HEADERLESS), offered in Develop's lens corrections
         spec = headerless(path)
         if spec:
             self._init_headerless(spec)
@@ -783,18 +783,10 @@ def barrel_maps(abc, H, W, region=None):
     return x * f + np.float32(W / 2 - 0.5), y * f + np.float32(H / 2 - 0.5)
 
 
-def distorted_region(abc, H, W, region, P=6):
-    """The part of the uncorrected frame that region of the corrected one is made from (CFA-aligned, with a margin
-    for the interpolation), as (y0, x0, h, w)."""
-    mx, my = barrel_maps(abc, H, W, region)
-    y0 = max(0, int(my.min()) - 4) // P * P; x0 = max(0, int(mx.min()) - 4) // P * P
-    y1 = min(H, int(my.max()) + 6); x1 = min(W, int(mx.max()) + 6)
-    return y0, x0, y1 - y0, x1 - x0
-
-
 def correct_distortion(img, abc, full_hw=None, region=None, at=(0, 0)):
-    """Linear float32 H × W × 3 -> the barrel correction, the same size. For a quick preview img is only the part of
-    a full_hw frame that starts at `at`, and region the part of the corrected frame wanted."""
+    """Linear float32 H × W × 3 -> the barrel correction, the same size (previews and Photo Library's thumbnails; Develop
+    applies it with its other geometry). img may be only the part of a full_hw frame that starts at `at`, and region
+    the part of the corrected frame wanted."""
     import cv2
     H, W = full_hw or img.shape[:2]
     mx, my = barrel_maps(abc, H, W, region)
@@ -1561,10 +1553,7 @@ def process(src, columns, opts, models, job, quick=False, on_column=None):
     if src.is_rgb:
         for c in cols: c['rawDenoise'] = 'none'
     region = quick_region(src) if quick else None
-    dist = None if src.is_rgb or not opts.get('lens_correct', True) else src.distortion
-    src_region = distorted_region(dist, src.H, src.W, region) if dist and region else region
-    src_c = _CropView(src, src_region) if src_region else src
-    if dist: job.log('info', f'lens distortion corrected (built-in {src.make} {src.model} profile)')
+    src_c = _CropView(src, region) if region else src
     mosaic, cam_to_work = None, None
     if not src.is_rgb:
         cam_to_work = cam_to_working(src.xyz_to_cam)
@@ -1583,7 +1572,6 @@ def process(src, columns, opts, models, job, quick=False, on_column=None):
         job.log('info', f'column {ci + 1}: {col["name"]} ({describe_column(col, is_xt, src.is_rgb)})')
         tc = time.time()
         work = run_column(col, src_c, mosaic, cam_to_work, models, job)
-        if dist: work = correct_distortion(work, dist, (src.H, src.W), region, src_region[:2] if src_region else (0, 0))
         job.log('ok', f'column {ci + 1} done in {time.time() - tc:.1f} s')
         flip = 0 if src.is_rgb else src.flip
         oriented = orient(work, flip)

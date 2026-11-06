@@ -64,6 +64,7 @@ GROUPS = {
     'masks': ('Masks and local adjustments', ['masks'], False),
 }
 BR_MIN, BR_RANGE = 0.0002, 1000
+BUILTIN = 'builtin'   # the lens key of RAW Demosaic's own profile for the camera (E.HEADERLESS), when it has one
 
 
 def identity_curve():
@@ -931,6 +932,7 @@ class DevelopTab:
             self.bitmaps.clear(); self.fills.clear(); self.op_layers.clear(); self.sel_mask = None; self.sel_spot = -1
             self.params = dev_defaults()
             self.params['lens'].update(focal=round((info.get('focal') or 0) * 10) / 10, aperture=round((info.get('aperture') or 0) * 10) / 10)
+            if info.get('distortion'): self.params['lens']['key'] = BUILTIN   # on by default
             self.camera = None; self.lens_cands = []
             self.history = [('Processed image', json.dumps(self.params))]; self.h_index = 0
         elif not same_dims:
@@ -1198,6 +1200,11 @@ class DevelopTab:
     def lens_params(self, p=None):
         p = p or self.params
         ls = p and p['lens']
+        if ls and ls.get('key') == BUILTIN:
+            d = self.info.get('distortion')
+            if not d or not ls.get('dist'): return None
+            return dict(dist=dict(model='barrel', terms=list(d)), unitD=self.info['short_side'] / 2, unitV=1,
+                        distAmt=ls['distAmt'] / 100, vigAmt=1)
         if not ls or not ls.get('key') or not self.lens_db or not self.frame_diag: return None
         L = self.lens_db.by_key.get(ls['key'])
         if not L: return None
@@ -1225,13 +1232,15 @@ class DevelopTab:
             threading.Thread(target=work, daemon=True).start()
             return
         if self.lens_db is False:
-            self.lens_status.configure(text='The Lensfun database was not found (models-desktop\\lensfun): run desktop\\setup_models.py.'); return
+            self.lens_status.configure(text='The Lensfun database was not found (models-desktop\\lensfun): run desktop\\setup_models.py.')
+            self.render_lens_ui(); return
         self._lens_loaded(self.lens_db, initial)
 
     def _lens_loaded(self, db, initial):
         self.lens_db = db
         if not db:
-            self.lens_status.configure(text='The Lensfun database was not found (models-desktop\\lensfun): run desktop\\setup_models.py.'); return
+            self.lens_status.configure(text='The Lensfun database was not found (models-desktop\\lensfun): run desktop\\setup_models.py.')
+            self.render_lens_ui(); return
         if not self.ready(): return
         i, ls = self.info, self.params['lens']
         cam = db.find_camera(i.get('make'), i.get('model'))
@@ -1246,9 +1255,21 @@ class DevelopTab:
             self.refit_crop(); self.history[0] = (self.history[0][0], json.dumps(self.params))
         self.render_lens_ui(); self.changed(type('P', (), {'path': ['lens']})())
 
+    def builtin_lens(self):
+        """RAW Demosaic's own profile for this camera, as an entry of the lens list, or None."""
+        if not self.info.get('distortion'): return None
+        name = f"{self.info.get('make', '')} {self.info.get('model', '')}".strip() + ' (built-in profile)'
+        return dict(key=BUILTIN, maker='', model=name, modelEn=name, crop=1, dist=[True], tca=[], vig=[])
+
     def render_lens_ui(self):
         if self.params is None: return
         ls, i, cam, db = self.params['lens'], self.info, self.camera, self.lens_db
+        own = self.builtin_lens()
+        if own and not db:
+            self._lens_list = [own]
+            vals = ['(no lens correction)', V.Lensfun.label(own)]
+            self.lens_box.configure(values=vals)
+            self.lens_sel.set(vals[1] if ls.get('key') == BUILTIN else vals[0])
         if db:
             camtxt = f"{cam['makerEn'] or cam['maker']} {cam['modelEn'] or cam['model']}" if cam else f"{i.get('make', '')} {i.get('model', '')}".strip() or 'unknown'
             self.lens_status.configure(text=f"Camera: {camtxt}{'' if cam else ' (not in Lensfun)'}" + (f" · lens in file: {i['lens']}" if i.get('lens') else '') +
@@ -1259,6 +1280,9 @@ class DevelopTab:
             else: lst = list(self.lens_cands[:60])
             cur = db.by_key.get(ls.get('key'))
             if cur and not any(L is cur for _, L in lst): lst.insert(0, (0, cur))
+            if own:
+                lst.insert(0, (0, own))
+                if ls.get('key') == BUILTIN: cur = own
             self._lens_list = [L for _, L in lst]
             vals = ['(no lens correction)'] + [db.label(L) for L in self._lens_list]
             self.lens_box.configure(values=vals)
@@ -1267,7 +1291,7 @@ class DevelopTab:
         for k, v in self.lens_chk.items(): v.set(bool(ls.get(k)))
 
     def lens_chosen(self):
-        if not self.ready() or not self.lens_db: return
+        if not self.ready() or not (self.lens_db or self.builtin_lens()): return
         i = self.lens_box.current()
         L = self._lens_list[i - 1] if i > 0 else None
         self.params['lens']['key'] = L['key'] if L else ''

@@ -289,7 +289,7 @@ class App:
         sr_models = [dict(model=m, weight=w) for m, w in self.sr_rows]
         return dict(space=key_of([(k, E.SPACES[k]['label']) for k in E.OUTPUT_SPACES], self.out_space.get(), 'srgb'),
                     tiff=self.save_tiff.get(), jpeg=self.save_jpeg.get(), jpeg_quality=int(self.jpeg_q.get()),
-                    save_columns=self.save_cols.get(), unique=self.unique.get(), out_dir=self.out_dir.get().strip(), lens_correct=self.lens_correct.get(),
+                    save_columns=self.save_cols.get(), unique=self.unique.get(), out_dir=self.out_dir.get().strip(),
                     restore=list(self.restore_chain), sr=dict(enabled=self.sr_on.get(), target=key_of(SR_TARGETS, self.sr_target.get(), '2'), save_each=self.sr_each.get(),
                                                               downscale=key_of(DOWNSCALE, self.sr_down.get(), 'lanczos'), models=sr_models))
 
@@ -695,9 +695,6 @@ class App:
         self.unique = tk.BooleanVar(value=o.get('unique', True))
         ttk.Checkbutton(c, text='Never replace existing files: add _2, _3 … to the name instead',
                         variable=self.unique, style='Card.TCheckbutton').pack(anchor='w')
-        self.lens_correct = tk.BooleanVar(value=o.get('lens_correct', True))
-        ttk.Checkbutton(c, text='Correct the lens distortion of cameras with a built-in profile (SJCAM SJ5000x)',
-                        variable=self.lens_correct, style='Card.TCheckbutton').pack(anchor='w')
         r = ttk.Frame(c, style='Card.TFrame'); r.pack(fill='x', pady=(6, 0))
         ttk.Label(r, text='Output folder', style='Card.TLabel', width=14).pack(side='left')
         self.out_dir = tk.StringVar(value=o.get('out_dir', ''))
@@ -956,7 +953,6 @@ class App:
         if not sel: return
         path = self.files[sel[0]]
         self.file_info.configure(text='Reading…')
-        lens = self.lens_correct.get()
 
         def work():
             try:
@@ -968,7 +964,7 @@ class App:
                 if src.is_rgb: thumb = E.display_image(thumb, 2400)
                 elif thumb is None:   # no usable embedded preview: a quick RCD of the mosaic, as the web app does
                     self.q.put(('call', self._show_file_info, path, txt + '\nNo embedded preview: making a quick RCD preview…', None))
-                    thumb = E.quick_preview(src, lens=lens); kind = 'quick RCD preview'
+                    thumb = E.quick_preview(src); kind = 'quick RCD preview'
                 self.q.put(('call', self._show_file_info, path, txt, thumb, kind))
             except Exception as ex:
                 self.q.put(('call', self._show_file_info, path, f'Could not read this file: {ex}', None))
@@ -1149,7 +1145,7 @@ class App:
         o = d.get('out')
         if o:
             if o.get('space') in E.OUTPUT_SPACES: self.out_space.set(E.SPACES[o['space']]['label'])
-            for var, k in ((self.save_tiff, 'tiff'), (self.save_jpeg, 'jpeg'), (self.save_cols, 'save_columns'), (self.lens_correct, 'lens_correct')):
+            for var, k in ((self.save_tiff, 'tiff'), (self.save_jpeg, 'jpeg'), (self.save_cols, 'save_columns')):
                 if k in o: var.set(bool(o[k]))
             if 'jpeg_quality' in o: self.jpeg_q.set(int(o['jpeg_quality']))
             if 'restore' in o: self.restore_chain = list(o['restore'])
@@ -1257,6 +1253,7 @@ class App:
             info.update(make=src.make, model=src.model, lens=src.lens, lens_make=src.lens_make, focal=src.focal, aperture=src.aperture,
                         f35=src.f35, iso=src.iso)
             info['frame_diag'] = math.hypot(src.W, src.H)
+            if src.distortion: info.update(distortion=list(src.distortion), short_side=min(src.W, src.H))
             if res is not None:
                 import rawdemosaic_develop_ui as DU
                 info['frame'] = DU.frame_of(res['region'], res['src_hw'], res['flip'], False)
